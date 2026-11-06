@@ -15,7 +15,8 @@
   "scripts": {
     "start": "node server.js",
     "test": "node test/fuzz.js",
-    "test:server": "node test/server.test.js"
+    "test:server": "node test/server.test.js",
+    "test:lobby": "node test/lobby.test.js"
   },
   "engines": {
     "node": ">=18"

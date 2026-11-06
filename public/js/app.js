@@ -1146,7 +1146,7 @@ function renderLobby() {
   const me = s.color, opp = other(me || 'w');
   const full = r.seats.w && r.seats.b;
   $('#lobby-title').textContent = !me ? 'This room is full' : full ? (r.seats[opp].ready ? `${r.seats[opp].name} is ready!` : 'Your friend is here') : 'Your room is ready';
-  $('#lobby-sub').textContent = !me ? 'You can watch once the game starts.' : full ? 'Hit ready when you are. The game starts when you both are.' : 'Send this link to a friend. The game starts when you’re both ready.';
+  $('#lobby-sub').textContent = !me ? 'Both seats are taken. If a player leaves, you’ll get their seat automatically. Otherwise you can watch once the game starts.' : full ? 'Hit ready when you are. The game starts when you both are.' : 'Send this link to a friend. The game starts when you’re both ready.';
   const row = c => {
     const seat = r.seats[c];
     if (!seat) return `<li class="seat empty"><span class="avatar ${c}"></span><div><div class="seat-name">Waiting for a friend<span class="waiting-dots"><i></i><i></i><i></i></span></div><div class="seat-sub">Plays ${COLOR_NAME[c]}</div></div></li>`;

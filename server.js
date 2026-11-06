@@ -96,25 +96,16 @@ function handle(ws, msg) {
     case 'join': {
       const r = rooms.get(String(msg.room || '').toLowerCase());
       if (!r) return send(ws, { t: 'error', code: 'no-room', msg: 'This room doesn’t exist (or it expired).' });
-      const token = clean(msg.token, 64);
-      const name = clean(msg.name, 24) || 'Player';
-      let c = ['w', 'b'].find(k => r.seats[k]?.token === token);
-      if (!c) {
-        const open = ['w', 'b'].filter(k => !r.seats[k]);
-        if (open.length) c = open[Math.floor(Math.random() * open.length)];
-      }
+      ws.token = clean(msg.token, 64);
+      ws.name = clean(msg.name, 24) || 'Player';
       r.lastActive = Date.now();
       ws.roomId = r.id;
-      if (!c) {
+      const c = ['w', 'b'].find(k => r.seats[k]?.token === ws.token) || freeSeat(r);
+      if (c) takeSeat(r, ws, c);
+      else {
         ws.color = null;
         r.spectators.add(ws);
         send(ws, { t: 'joined', color: null, id: r.id, mode: r.mode });
-      } else {
-        const prev = r.seats[c];
-        if (prev?.ws && prev.ws !== ws) { send(prev.ws, { t: 'error', code: 'replaced', msg: 'This game was opened in another tab.' }); prev.ws.roomId = null; prev.ws.close(); }
-        r.seats[c] = { token, name, ws, connected: true, since: 0 };
-        ws.color = c;
-        send(ws, { t: 'joined', color: c, id: r.id, mode: r.mode });
       }
       broadcastRoom(r);
       if (r.state) send(ws, { t: 'state', view: viewFor(r.state, ws.color), fx: [] });
@@ -176,6 +167,43 @@ function handle(ws, msg) {
   }
 }
 
+// Before the game starts, a seat whose player left (closed the tab, opened the link in another app…)
+// can be taken over after a short grace period, so a friend never gets stuck watching an empty lobby.
+// The grace period keeps a quick page refresh from losing your seat.
+const LOBBY_GRACE_MS = 4000;
+
+function freeSeat(r) {
+  const open = ['w', 'b'].filter(k => !r.seats[k]);
+  if (open.length) return open[Math.floor(Math.random() * open.length)];
+  if (r.state) return null;
+  const now = Date.now();
+  return ['w', 'b'].filter(k => !r.seats[k].connected && now - r.seats[k].since >= LOBBY_GRACE_MS)
+    .sort((a, b) => r.seats[a].since - r.seats[b].since)[0] || null;
+}
+
+function takeSeat(r, ws, c) {
+  const prev = r.seats[c];
+  if (prev?.ws && prev.ws !== ws) { send(prev.ws, { t: 'error', code: 'replaced', msg: 'This game was opened in another tab.' }); prev.ws.roomId = null; prev.ws.close(); }
+  if (prev && prev.token !== ws.token) r.ready[c] = false; // someone new: they haven't said they're ready
+  r.seats[c] = { token: ws.token, name: ws.name, ws, connected: true, since: 0 };
+  r.spectators.delete(ws);
+  ws.color = c;
+  send(ws, { t: 'joined', color: c, id: r.id, mode: r.mode });
+}
+
+/** Lobby only: move waiting spectators into seats that opened up. */
+function promote(r) {
+  if (r.state || !r.spectators.size) return;
+  let moved = false;
+  for (const ws of r.spectators) {
+    const c = freeSeat(r);
+    if (!c) break;
+    takeSeat(r, ws, c);
+    moved = true;
+  }
+  if (moved) broadcastRoom(r);
+}
+
 function detach(ws, room) {
   room.spectators.delete(ws);
   const seat = ws.color && room.seats[ws.color];
@@ -183,7 +211,10 @@ function detach(ws, room) {
     seat.connected = false;
     seat.ws = null;
     seat.since = Date.now();
-    if (!room.state) room.ready[ws.color] = false;
+    if (!room.state) {
+      room.ready[ws.color] = false;
+      setTimeout(() => rooms.get(room.id) === room && promote(room), LOBBY_GRACE_MS + 50);
+    }
   }
   broadcastRoom(room);
 }

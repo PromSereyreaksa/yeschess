@@ -23,3 +23,4 @@ jobs:
           npm start &
           for i in $(seq 1 20); do curl -sf http://localhost:3000/health && break; sleep 0.5; done
           npm run test:server
+          npm run test:lobby

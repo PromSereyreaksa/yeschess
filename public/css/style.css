@@ -766,3 +766,19 @@ h1, h2, h3 { margin: 0; letter-spacing: -0.02em; }
 /* particle VFX canvas (spills past the board edges) */
 .vfx { position: absolute; z-index: 25; pointer-events: none; }
 .stamp.shadow span { background: #12051F; color: #D9C2FF; border-color: #A66BFF; box-shadow: 8px 8px 0 #7B2CFF; }
+
+/* lobby on phones / short screens: compact, and the ready button is pinned to the bottom of the screen */
+@media (max-width: 560px), (max-height: 720px) {
+  .lobby { align-items: flex-start; padding: 4px 12px 12px; }
+  .lobby-card { padding: 18px; }
+  .lobby-head { margin-bottom: 12px; }
+  .lobby-card h2 { font-size: 24px; }
+  .lobby-card p { margin: 4px 0 14px; font-size: 14px; }
+  .seats { margin: 14px 0 12px; }
+  .seat { padding: 8px 10px; }
+  #ready-btn {
+    position: sticky; bottom: max(12px, env(safe-area-inset-bottom)); z-index: 5;
+    box-shadow: 0 3px 0 var(--coral-d), 0 12px 28px -8px rgba(29, 27, 24, .45);
+  }
+  #ready-btn.is-ready { box-shadow: 0 3px 0 var(--green-d), 0 12px 28px -8px rgba(29, 27, 24, .45); }
+}

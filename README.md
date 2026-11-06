@@ -127,6 +127,7 @@ test/
 ```bash
 npm test                     # engine fuzz test across every mode
 npm run test:server          # anti-cheat checks (start the server first)
+npm run test:lobby           # lobby seat hand-over checks (server running)
 ```
 
 ## Hosting (free)
