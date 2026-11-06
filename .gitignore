@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# logs
+*.log
+npm-debug.log*
+
+# env / secrets
+.env
+.env.*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# test / tooling output
+.playwright-mcp/
+coverage/

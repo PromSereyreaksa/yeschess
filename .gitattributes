@@ -1,0 +1,5 @@
+# normalize line endings (this was made on Windows)
+* text=auto eol=lf
+*.svg text eol=lf
+*.png binary
+*.jpg binary

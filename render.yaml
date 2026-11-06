@@ -1,0 +1,15 @@
+# Render Blueprint: one free Node web service that serves the game and the WebSocket rooms.
+# Every push to main deploys automatically once the GitHub "CI" checks pass.
+services:
+  - type: web
+    name: yeschess
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
