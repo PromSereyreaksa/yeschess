@@ -1,7 +1,7 @@
 // Chaos-mode random events. Each run() works on a scratch copy of the state; if the
 // result is illegal (the side that just moved would be in check) we retry or skip.
 import { ALL_SQUARES, rankOf, fileOf, sqName, neighbors, offset, pawnOk, kingAttacked, other, sanitizeCastling } from './rules.js';
-import { shielded, destroy, relocate, relocateMany, hole, hazard, mark, pick, weighted, shuffled } from './state.js';
+import { shielded, destroy, relocate, relocateMany, hole, hazard, mark, pick, weighted, shuffled, hideMap } from './state.js';
 
 const midEmpty = st => ALL_SQUARES.filter(s => rankOf(s) >= 2 && rankOf(s) <= 5 && !st.board[s] && !hazard(st, s));
 const vulnerable = (st, s) => st.board[s] && st.board[s][1] !== 'k' && !shielded(st, s);
@@ -148,9 +148,10 @@ export function runEvent(st, fx, rnd = Math.random) {
     sanitizeCastling(scratch);
     scratch.ep = '';
     const { turnSnap, rewindSnap, board: before } = st; // board before the event, for client animation sequencing
+    const hide = hideMap(st);
     Object.assign(st, scratch, { turnSnap, rewindSnap });
     const e = EVENTS[id];
-    fx.push({ k: 'event', id, name: e.name, icon: e.icon, desc: local[0]?.sub || e.desc, before }, ...local);
+    fx.push({ k: 'event', id, name: e.name, icon: e.icon, desc: local[0]?.sub || e.desc, before, hide }, ...local);
     return id;
   }
   return null;

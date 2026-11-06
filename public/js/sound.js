@@ -9,8 +9,11 @@ export function setMuted(m) {
   try { localStorage.setItem('yc-muted', m ? '1' : '0'); } catch { /* ignore */ }
 }
 
+let hushed = false; // replays play silently (one tape-rewind sound instead)
+export const hush = on => { hushed = on; };
+
 function ac() {
-  if (muted) return null;
+  if (muted || hushed) return null;
   try {
     if (!ctx) {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -111,7 +114,30 @@ const sparkle = (delay = 0, n = 5) =>
   rep(n, 0.045, (i, d) => osc([2093, 2637, 3136, 3520, 4186, 4699][i % 6], { type: 'triangle', dur: 0.18, vol: 0.07, delay: delay + d, wet: 0.6 }));
 
 // ---------------------------------------------------------------- item signatures
+const thunderclap = (delay = 0, big = 1) => {
+  noise({ type: 'highpass', f: 2500, dur: 0.06, vol: 0.5, delay });                      // crack
+  noise({ type: 'bandpass', f: 1800, to: 400, q: 0.7, dur: 0.35, vol: 0.45, delay: delay + 0.02, wet: 0.4 });
+  noise({ type: 'lowpass', f: 900, to: 50, dur: 1.4 * big, vol: 0.55, attack: 0.05, delay: delay + 0.05, wet: 0.6 }); // rolling rumble
+  osc(70, { to: 30, dur: 1 * big, vol: 0.4, delay: delay + 0.04 });
+};
+const shing = (delay = 0, f = 1850) => { fm(f, { ratio: 1.41, index: 9, dur: 0.9, vol: 0.1, delay, wet: 0.7 }); noise({ type: 'highpass', f: 6000, dur: 0.08, vol: 0.3, delay }); };
+const choir = (notes, { delay = 0, dur = 1.4, vol = 0.05 } = {}) => notes.forEach((f, i) => osc(f, { type: 'triangle', dur, vol, attack: 0.3, vib: 3, vibRate: 5 + i * 0.4, delay, wet: 0.85 }));
+
 const ITEM = {
+  thunder: () => { osc(800, { to: 3200, dur: 0.12, vol: 0.05, type: 'sawtooth', lp: 5000 }); thunderclap(0.08); },
+  slash: () => { [0, 0.09, 0.18].forEach(d => { noise({ type: 'bandpass', f: 5500, to: 1200, q: 2.5, dur: 0.14, vol: 0.4, delay: d }); shing(d + 0.04, 1700 + d * 2000); }); },
+  imposter: () => { poof(0, 0.45); poof(0.1, 0.4); osc(300, { to: 180, dur: 0.5, vol: 0.08, vib: 25, vibRate: 7, delay: 0.25, wet: 0.5 }); },
+  disguise: () => { noise({ type: 'bandpass', f: 1200, to: 500, q: 2, dur: 0.4, vol: 0.18, attack: 0.1, wet: 0.5 }); osc(660, { to: 440, dur: 0.5, vol: 0.05, type: 'triangle', delay: 0.1, wet: 0.6 }); },
+  hyperbeam: () => { osc(80, { to: 1200, dur: 0.6, vol: 0.14, type: 'sawtooth', attack: 0.55, curve: 'lin', lp: 3000 }); noise({ type: 'bandpass', f: 200, to: 5000, q: 1.2, dur: 0.6, vol: 0.3, attack: 0.55, curve: 'lin' });
+    noise({ type: 'lowpass', f: 3000, dur: 1.2, vol: 0.5, delay: 0.56, wet: 0.5 }); osc(55, { dur: 1.2, vol: 0.45, vib: 6, vibRate: 30, delay: 0.56 }); osc(2400, { type: 'sawtooth', to: 300, dur: 0.9, vol: 0.06, delay: 0.56, lp: 6000 }); },
+  orbital: () => { rep(4, 0.12, (i, d) => osc(1760, { type: 'square', dur: 0.05, vol: 0.05, delay: d })); osc(3000, { to: 200, dur: 0.6, vol: 0.06, delay: 0.1, wet: 0.5 }); boomish(0.62, 1.6); thunderclap(0.64, 1.3); },
+  zero: () => { rep(14, 0.04, (i, d) => fm(2200 + Math.random() * 3000, { ratio: 2.76, index: 3, dur: 0.3, vol: 0.05, delay: d, wet: 0.6 })); noise({ type: 'highpass', f: 4000, dur: 0.9, vol: 0.18, attack: 0.05, wet: 0.5 }); osc(130, { to: 60, dur: 1, vol: 0.25 }); shing(0.3, 2600); },
+  storm: () => { [0, 0.3, 0.6].forEach(d => thunderclap(d, 0.8)); },
+  aegis: () => { choir([392, 523.3, 659.3, 784], { dur: 1.3 }); fm(196, { ratio: 1.5, index: 4, dur: 1.2, vol: 0.16, wet: 0.6 }); shing(0.15, 1568); },
+  ascension: () => { osc(90, { type: 'sawtooth', to: 1200, dur: 0.7, vol: 0.08, attack: 0.6, lp: 3200 }); choir([523.3, 659.3, 784, 1046.5], { delay: 0.3 }); shing(0.7, 2093); sparkle(0.75, 6); },
+  shadowarmy: () => { osc(65, { type: 'sawtooth', dur: 1.4, vol: 0.18, vib: 5, vibRate: 4, attack: 0.3, lp: 500, wet: 0.5 }); choir([130.8, 155.6, 196], { dur: 1.6, vol: 0.06 }); rep(3, 0.25, (i, d) => osc(55, { dur: 0.18, vol: 0.4, to: 35, delay: 0.3 + d })); },
+  timestop: () => { fm(880, { ratio: 1.01, index: 6, dur: 1.2, vol: 0.12, wet: 0.8 }); osc(1760, { to: 110, dur: 0.9, vol: 0.06, wet: 0.6 }); rep(6, 0.16, (i, d) => osc(1200, { type: 'square', dur: 0.03, vol: 0.05, delay: 0.3 + d })); },
+  hypnosis: () => { osc(330, { to: 660, dur: 1.1, vol: 0.12, vib: 50, vibRate: 6, attack: 0.2, wet: 0.7 }); osc(495, { to: 330, dur: 1.1, vol: 0.06, vib: 70, vibRate: 9, delay: 0.1, wet: 0.7 }); },
   teleport: () => { osc(380, { to: 2600, dur: 0.22, vol: 0.14, wet: 0.4 }); whoosh(0, true, 0.22, 0.18); sparkle(0.16, 6); fm(1760, { ratio: 2.01, index: 3, dur: 0.7, vol: 0.06, delay: 0.2 }); },
   shield: () => { fm(196, { ratio: 1.5, index: 4, dur: 1.1, vol: 0.16, wet: 0.6 }); osc(98, { dur: 0.9, vol: 0.25, attack: 0.05 }); fm(1568, { ratio: 3.01, index: 2, dur: 0.9, vol: 0.05, delay: 0.05 }); },
   rewind: () => { noise({ type: 'bandpass', f: 600, to: 2400, q: 2, dur: 0.6, vol: 0.3, attack: 0.55, curve: 'lin', wet: 0.4 }); osc(900, { type: 'sawtooth', to: 140, dur: 0.7, vol: 0.06, vib: 30, vibRate: 9, lp: 2200 }); rep(4, 0.12, (i, d) => osc(1400 - i * 200, { type: 'square', dur: 0.04, vol: 0.04, delay: d })); },
@@ -149,6 +175,16 @@ const EVENT = {
 
 // ---------------------------------------------------------------- public kit
 export const sfx = {
+  thunder: () => thunderclap(0),
+  slashHit: () => noise({ type: 'bandpass', f: 4000, to: 900, q: 2, dur: 0.12, vol: 0.35 }),
+  reveal: () => { poof(0, 0.5); [392, 523.3, 659.3].forEach((f, i) => osc(f, { type: 'square', dur: 0.1, vol: 0.06, delay: 0.15 + i * 0.07 })); },
+  imposterPop: () => { poof(0, 0.5); osc(500, { to: 120, dur: 0.6, vol: 0.12, type: 'triangle', delay: 0.05, wet: 0.5 }); },
+  fuse: () => { whoosh(0, true, 0.7, 0.28); osc(110, { to: 880, dur: 0.75, vol: 0.1, type: 'sawtooth', attack: 0.7, curve: 'lin', lp: 2500 }); boomish(0.78, 1.2); shing(0.8, 2093); choir([523.3, 659.3, 784, 1046.5], { delay: 0.9, dur: 1.2 }); },
+  quest: () => { [523.3, 659.3, 784, 1046.5, 1318.5].forEach((f, i) => osc(f, { type: 'square', dur: 0.14, vol: 0.06, delay: i * 0.07, wet: 0.4 })); shing(0.38, 2093); choir([523.3, 659.3, 784], { delay: 0.4, dur: 1.1 }); },
+  questTick: () => { osc(880, { type: 'triangle', dur: 0.08, vol: 0.08 }); osc(1318.5, { type: 'triangle', dur: 0.14, vol: 0.08, delay: 0.07, wet: 0.4 }); },
+  replay: () => { noise({ type: 'bandpass', f: 3000, to: 300, q: 2, dur: 0.45, vol: 0.3, wet: 0.3 }); rep(5, 0.06, (i, d) => osc(1500 - i * 220, { type: 'square', dur: 0.03, vol: 0.04, delay: d })); osc(70, { dur: 1.6, vol: 0.12, vib: 2, vibRate: 2, attack: 0.3, delay: 0.3, wet: 0.6 }); },
+  legendary: () => { shing(0, 1568); shing(0.12, 2349); choir([392, 587.3, 784], { dur: 0.9 }); },
+  discard: () => { noise({ type: 'bandpass', f: 1200, to: 3500, q: 1.5, dur: 0.35, vol: 0.25, attack: 0.05 }); noise({ type: 'highpass', f: 2500, dur: 0.5, vol: 0.12, delay: 0.1 }); },
   move: () => { osc(540, { type: 'triangle', dur: 0.06, vol: 0.14 }); noise({ type: 'highpass', f: 2200, dur: 0.04, vol: 0.12 }); },
   capture: () => { osc(170, { to: 55, dur: 0.18, vol: 0.45 }); noise({ type: 'bandpass', f: 1300, q: 1, dur: 0.14, vol: 0.4 }); fm(900, { ratio: 1.41, index: 4, dur: 0.2, vol: 0.05, wet: 0.3 }); },
   check: () => { osc(196, { type: 'sawtooth', dur: 0.32, vol: 0.12, lp: 1800 }); osc(233, { type: 'sawtooth', dur: 0.32, vol: 0.1, lp: 1800 }); fm(1480, { ratio: 1.41, index: 5, dur: 0.6, vol: 0.06, wet: 0.5 }); },

@@ -22,6 +22,9 @@ const RECIPE = {
   laser: ['stripes', 'r'], rocket: ['burst', 'b'], mine: ['checker', 'p'], emp: ['rings', 'q'], shotgun: ['burst', 'n'],
   reverse: ['spiral', 'k'], skip: ['chevrons', 'p'], double: ['stripes', 'n'], shuffle: ['zigzag', 'p'], steal: ['dots', 'b'],
   mimic: ['rings', 'q'], wildcard: ['rays', 'k'],
+  thunder: ['zigzag', 'r'], slash: ['stripes', 'n'], imposter: ['dots', 'q'], disguise: ['checker', 'p'],
+  hyperbeam: ['rays', 'r'], orbital: ['rings', 'k'], zero: ['shards', 'q'], storm: ['zigzag', 'q'],
+  aegis: ['rings', 'r'], ascension: ['rays', 'q'], shadowarmy: ['spiral', 'k'], timestop: ['spiral', 'k'], hypnosis: ['spiral', 'b'],
   meteor: ['burst', 'r'], earthquake: ['zigzag', 'k'], blackhole: ['spiral', 'q'], gravity: ['chevrons', 'p'],
   rotate: ['rings', 'n'], portals: ['rings', 'b'], zombies: ['checker', 'p'], mutation: ['dots', 'n'],
 };
@@ -119,7 +122,8 @@ export function cardInfo(kind) {
   const it = ITEMS[kind], ev = EVENTS[kind];
   const cat = it ? it.cat : 'event';
   const weight = it ? POOLS[cat]?.[kind] : 0;
-  return { name: (it || ev).name, desc: (it || ev).desc, icon: (it || ev).icon, cat, stars: weight === 1 ? 3 : weight === 2 ? 2 : weight === 3 ? 1 : 0 };
+  const legendary = !!it?.legendary;
+  return { name: (it || ev).name, desc: (it || ev).desc, icon: (it || ev).icon, cat, legendary, stars: legendary ? 3 : weight === 1 ? 3 : weight === 2 ? 2 : weight === 3 ? 1 : 0 };
 }
 
 export function cardSVG(kind, { thumb = false } = {}) {
@@ -145,10 +149,12 @@ export function cardSVG(kind, { thumb = false } = {}) {
   // long descriptions get a smaller font and a 4th line instead of being cut off
   let lines = wrap(info.desc, 34, 9), fs = 11.2, lh = 14, y0 = 292;
   if (lines.length > 3) { lines = wrap(info.desc, 42, 4); fs = 9.6; lh = 11.6; y0 = 287; }
-  return `<svg class="card-svg" viewBox="0 0 240 336" role="img" aria-label="${esc(info.name)}">
+  const L = info.legendary;
+  return `<svg class="card-svg${L ? ' legendary' : ''}" viewBox="0 0 240 336" role="img" aria-label="${esc(info.name)}">
     <rect width="240" height="336" rx="18" fill="${INK}"/>
-    <rect x="7" y="7" width="226" height="322" rx="13" fill="${p.bg}"/>
-    <text x="20" y="29" font-family="Bricolage Grotesque, sans-serif" font-size="12" font-weight="800" letter-spacing="2" fill="#fff">${p.type.toUpperCase()}</text>
+    ${L ? '<rect x="4" y="4" width="232" height="328" rx="15" fill="#FFC93D"/><rect x="10" y="10" width="220" height="316" rx="11" fill="#1D1B18"/>' : ''}
+    <rect x="${L ? 13 : 7}" y="${L ? 13 : 7}" width="${L ? 214 : 226}" height="${L ? 310 : 322}" rx="${L ? 9 : 13}" fill="${p.bg}"/>
+    <text x="20" y="${L ? 31 : 29}" font-family="Bricolage Grotesque, sans-serif" font-size="12" font-weight="800" letter-spacing="2" fill="${L ? '#FFE58A' : '#fff'}">${L ? 'LEGENDARY' : p.type.toUpperCase()}</text>
     ${[0, 1, 2].slice(0, info.stars).map(i => star5(214 - i * 17, 23, 7.5, '#FFC93D')).join('')}
     ${art}
     <rect x="${AX + 4}" y="236" width="${AW}" height="38" rx="9" fill="${INK}"/>

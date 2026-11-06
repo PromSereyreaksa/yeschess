@@ -21,10 +21,12 @@ export class Board {
     this.orient = 'w';
     this.pieces = {}; // sq -> element
     this.tokenKeys = {};
-    el.innerHTML = '<div class="squares"></div><div class="pieces"></div><div class="fx"></div>';
+    el.innerHTML = '<div class="squares"></div><div class="pieces"></div><svg class="annot" viewBox="0 0 8 8" aria-hidden="true"></svg><div class="fx"></div>';
     this.sqLayer = el.querySelector('.squares');
     this.pcLayer = el.querySelector('.pieces');
+    this.annotLayer = el.querySelector('.annot');
     this.fxLayer = el.querySelector('.fx');
+    this.annot = { arrows: new Map(), marks: new Set() };
     this.sqs = {};
     for (const s of ALL_SQUARES) {
       const d = document.createElement('div');
@@ -42,6 +44,40 @@ export class Board {
     this.orient = c;
     this.layout();
     for (const [sq, el] of Object.entries(this.pieces)) el.style.transform = this.tf(sq);
+    this.renderAnnotations();
+  }
+
+  // ------------------------------------------------------------- annotations
+  // Right-click a square to highlight it, right-drag to draw an arrow (like chess.com).
+  // A left click or the next move clears them.
+  toggleAnnotation(from, to) {
+    const a = this.annot;
+    if (from === to) { a.marks.has(from) ? a.marks.delete(from) : a.marks.add(from); }
+    else { const k = from + to; a.arrows.has(k) ? a.arrows.delete(k) : a.arrows.set(k, [from, to]); }
+    this.renderAnnotations();
+  }
+  clearAnnotations() {
+    if (!this.annot.arrows.size && !this.annot.marks.size) return;
+    this.annot.arrows.clear(); this.annot.marks.clear();
+    this.renderAnnotations();
+  }
+  renderAnnotations(preview) {
+    const c = sq => { const [x, y] = this.xy(sq); return [x + 0.5, y + 0.5]; };
+    let out = '';
+    for (const sq of this.annot.marks) { const [x, y] = this.xy(sq); out += `<rect x="${x}" y="${y}" width="1" height="1" class="an-mark"/>`; }
+    const arrow = ([f, t], cls = '') => {
+      const [x1, y1] = c(f), [x2, y2] = c(t), dx = x2 - x1, dy = y2 - y1;
+      const pts = (Math.abs(dx) === 1 && Math.abs(dy) === 2) || (Math.abs(dx) === 2 && Math.abs(dy) === 1)
+        ? (Math.abs(dy) > Math.abs(dx) ? [[x1, y1], [x1, y2], [x2, y2]] : [[x1, y1], [x2, y1], [x2, y2]]) // knight: an L
+        : [[x1, y1], [x2, y2]];
+      const [px, py] = pts.at(-2), len = Math.hypot(x2 - px, y2 - py), ux = (x2 - px) / len, uy = (y2 - py) / len;
+      const head = 0.42, w = 0.36, bx = x2 - ux * head, by = y2 - uy * head;
+      const line = [...pts.slice(0, -1), [bx, by]].map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(3)},${p[1].toFixed(3)}`).join('');
+      return `<g class="an-arrow ${cls}"><path d="${line}"/><polygon points="${x2},${y2} ${bx - uy * w},${by + ux * w} ${bx + uy * w},${by - ux * w}"/></g>`;
+    };
+    for (const pr of this.annot.arrows.values()) out += arrow(pr);
+    if (preview && preview[0] !== preview[1]) out += arrow(preview, 'preview');
+    this.annotLayer.innerHTML = out;
   }
 
   xy(sq) {
@@ -90,6 +126,7 @@ export class Board {
    * removeDelay: { sq: ms } delays the disappearance of pieces destroyed by effects.
    */
   setPieces(board, { batches = [], removeDelay = {}, addDelay = 0, instant = false } = {}) {
+    if (batches.length && !instant) this.clearAnnotations();
     const els = { ...this.pieces };
     const moved = new Map(); // el -> { from, to, style }
     const doomed = [];
@@ -163,6 +200,15 @@ export class Board {
       el.classList.toggle('shield', (m.shield || 0) > view.ply);
       el.classList.toggle('frozen', (m.frozen || 0) > view.ply);
       el.classList.toggle('zombie', !!m.zombie);
+      // only the owner's view carries these marks
+      const badge = m.fake ? 'venetian-mask' : m.disguise ? 'eye' : '';
+      if ((el.dataset.badge || '') !== badge) {
+        el.dataset.badge = badge;
+        el.querySelector('.badge')?.remove();
+        if (badge) el.insertAdjacentHTML('beforeend', `<span class="badge ${m.fake ? 'fake' : 'disguise'}" title="${m.fake ? 'Your imposter (fake queen)' : 'Disguised: your opponent sees a pawn'}">${icon(badge)}</span>`);
+      }
+      el.classList.toggle('fake', !!m.fake);
+      el.classList.toggle('disguised', !!m.disguise);
     }
     const tokens = {};
     const add = (sq, html) => (tokens[sq] = (tokens[sq] || '') + html);
@@ -203,16 +249,20 @@ export class Board {
 
   // ------------------------------------------------------------------ input
   bindPointer() {
-    let down = null;
+    let down = null, rdown = null;
     const el = this.el;
+    el.addEventListener('contextmenu', e => e.preventDefault());
     el.addEventListener('pointerdown', e => {
+      if (e.button === 2) { rdown = this.sqAt(e.clientX, e.clientY); return; }
       if (e.button !== 0) return;
+      this.clearAnnotations();
       const sq = this.sqAt(e.clientX, e.clientY);
       if (!sq) return;
       down = { sq, x: e.clientX, y: e.clientY, drag: false, pid: e.pointerId };
       el.setPointerCapture(e.pointerId);
     });
     el.addEventListener('pointermove', e => {
+      if (rdown) { const over = this.sqAt(e.clientX, e.clientY); if (over !== this.rover) { this.rover = over; this.renderAnnotations(over ? [rdown, over] : null); } return; }
       if (!down) { this.hover(this.sqAt(e.clientX, e.clientY)); return; }
       if (!down.drag && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6 && this.opts.canDrag?.(down.sq) && this.pieces[down.sq]) {
         down.drag = true;
@@ -230,6 +280,12 @@ export class Board {
       }
     });
     const up = e => {
+      if (e.button === 2 && rdown) {
+        const to = this.sqAt(e.clientX, e.clientY), from = rdown;
+        rdown = null; this.rover = null;
+        if (to) this.toggleAnnotation(from, to); else this.renderAnnotations();
+        return;
+      }
       if (!down) return;
       const d = down; down = null;
       const sq = this.sqAt(e.clientX, e.clientY);
@@ -259,8 +315,9 @@ export class Board {
 
   /** Screen-space centre of a square (for flying elements to/from the board). */
   screenCenter(sq) {
-    const r = this.el.getBoundingClientRect(), [x, y, w] = this.center(sq);
-    return [r.left + x, r.top + y, w];
+    // the board can be zoomed (slow-motion camera): scale layout offsets to on-screen pixels
+    const r = this.el.getBoundingClientRect(), z = r.width / (this.el.clientWidth || r.width), [x, y, w] = this.center(sq);
+    return [r.left + x * z, r.top + y * z, w * z];
   }
 
   /** Crosshairs that snap onto target squares before an effect lands. */

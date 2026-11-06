@@ -4,16 +4,19 @@ import { other, safeAfter, kingAttacked, rankOf } from './rules.js';
 
 export const MODES = {
   classic: { name: 'Classic', tag: 'Pure chess. No tricks.' },
-  chaos: { name: 'Chaos', tag: 'Power-ups, crates and random events.', pool: 'power', start: 2, every: 4, max: 4, events: true, crates: true },
+  chaos: { name: 'Chaos', tag: 'Everything at once: power-ups, weapons, cards, crates and random events.', pool: 'mixed', start: 2, every: 4, max: 5, events: true, crates: true },
   weapons: { name: 'Weapon', tag: 'Lasers, rockets and hidden mines.', pool: 'weapon', start: 2, every: 3, max: 3 },
   cards: { name: 'Card', tag: 'A hand of rule-bending cards.', pool: 'card', start: 3, every: 2, max: 5 },
 };
 
 export const POOLS = {
   power: { teleport: 3, shield: 3, rewind: 1, clone: 2, mind: 2, swap: 2, ghost: 3, freeze: 3, resurrect: 2, evolve: 2 },
-  weapon: { laser: 3, rocket: 2, mine: 3, emp: 2, shotgun: 3 },
-  card: { reverse: 2, skip: 2, shuffle: 2, steal: 2, mimic: 2, double: 3, wildcard: 1 },
+  weapon: { laser: 3, rocket: 2, mine: 3, emp: 2, shotgun: 3, thunder: 2, slash: 3 },
+  card: { reverse: 2, skip: 2, shuffle: 2, steal: 2, mimic: 2, double: 3, wildcard: 1, imposter: 2, disguise: 2 },
 };
+// Chaos draws from everything; weapons and cards a little rarer than power-ups.
+const scaled = (t, f) => Object.fromEntries(Object.entries(t).map(([k, w]) => [k, w * f]));
+POOLS.mixed = { ...POOLS.power, ...scaled(POOLS.weapon, 0.6), ...scaled(POOLS.card, 0.6) };
 
 export function weighted(table, rnd = Math.random) {
   const entries = Object.entries(table);
@@ -32,6 +35,17 @@ export function shuffled(arr, rnd = Math.random) {
 export const mark = (st, sq) => (st.marks[sq] ||= {});
 export const shielded = (st, sq) => (st.marks[sq]?.shield || 0) > st.ply;
 export const frozen = (st, sq) => (st.marks[sq]?.frozen || 0) > st.ply;
+/** Imposter: a fake queen. Looks real to the opponent, can't capture, pops when exposed. */
+export const isFake = (st, sq) => !!st.marks[sq]?.fake;
+/** Disguise: a real queen the opponent sees as a pawn until it gives itself away. */
+export const isDisguised = (st, sq) => !!st.marks[sq]?.disguise && st.board[sq]?.[1] === 'q';
+
+/** Squares whose true piece must be hidden from `viewer` in a board snapshot: { sq: shownAs }. */
+export function hideMap(st) {
+  const out = {};
+  for (const [sq, m] of Object.entries(st.marks)) if (m.disguise && st.board[sq]?.[1] === 'q') out[sq] = st.board[sq][0];
+  return out; // owner colour per square; shown as that colour's pawn to everyone else
+}
 
 export function expireMarks(st) {
   for (const [sq, m] of Object.entries(st.marks)) {
@@ -65,9 +79,14 @@ export function relocateMany(st, pairs) {
 export function destroy(st, sq) {
   const p = st.board[sq];
   if (!p) return null;
+  const m = st.marks[sq];
   delete st.board[sq];
   delete st.marks[sq];
+  if (m?.fake) { (st._popped ||= []).push(sq); return p; } // an imposter: nothing real was lost
+  if (m?.disguise) (st._revealed ||= []).push(sq);
   st.captured[p[0]].push(p[1]);
+  const q = st.quests?.[p[0]];
+  if (q?.kind === 'wall' && !q.done && q.n) { q.n = 0; (st._wallReset ||= []).push(p[0]); } // Iron Wall: losing a piece resets it
   return p;
 }
 
@@ -77,9 +96,9 @@ export const portal = (st, sq) => !!st.portals && (st.portals.a === sq || st.por
 export const hazard = (st, sq) => hole(st, sq) || crate(st, sq) || portal(st, sq);
 
 // ---- items -----------------------------------------------------------------
-export function giveItem(st, c, kind, fx, why = 'gain') {
+export function giveItem(st, c, kind, fx, why = 'gain', force = false) {
   const max = MODES[st.mode]?.max ?? 4;
-  if (st.inv[c].length >= max) {
+  if (!force && st.inv[c].length >= max) {
     fx.push({ k: 'toast', text: 'Inventory full — item lost', only: c });
     return false;
   }

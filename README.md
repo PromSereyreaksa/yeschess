@@ -24,7 +24,7 @@ To play someone on the same Wi-Fi, send them `http://<your-local-ip>:3000`. To p
 | Mode | Vibe |
 | --- | --- |
 | **Classic** | Normal chess. For cowards. |
-| **Chaos** | 2 power-ups to start, loot crates on the board, a new power-up every 4 turns, random events. The main event. |
+| **Chaos** | Everything at once: power-ups, weapons *and* cards drop from crates and every 4 turns, random events, hold up to 5 items. Most fusion combos. The main event. |
 | **Weapon Chess** | 2 weapons to start, +1 every 3 turns. Things explode. |
 | **Card Chess** | 3 cards to start, draw every 2 turns. Uno energy. |
 

@@ -1,6 +1,6 @@
 // Plays many random games in every mode and checks engine invariants after each action.
 import { newGame, applyAction, legalMoves, viewFor, itemAllowed } from '../shared/game.js';
-import { itemStep, itemUsable } from '../shared/items.js';
+import { itemStep, itemUsable, fusionOf } from '../shared/items.js';
 import { kingSq, inCheck, other, rankOf } from '../shared/rules.js';
 import { botAction } from '../shared/bot.js';
 
@@ -12,11 +12,28 @@ function check(st, ctx) {
   for (const c of ['w', 'b']) if (!kingSq(st.board, c)) throw new Error(`${ctx}: missing ${c} king`);
   for (const [sq, p] of Object.entries(st.board)) if (p[1] === 'p' && (rankOf(sq) === 0 || rankOf(sq) === 7)) throw new Error(`${ctx}: pawn on back rank ${sq}`);
   if (st.status === 'playing' && inCheck(st, other(st.turn))) throw new Error(`${ctx}: side not to move is in check`);
-  JSON.stringify(viewFor(st, 'w'));
+  // hidden information never reaches the other side
+  for (const viewer of ['w', 'b']) {
+    const v = viewFor(st, viewer);
+    for (const [sq, m] of Object.entries(st.marks)) {
+      const p = st.board[sq];
+      if (!p || p[0] === viewer) continue;
+      if (m.disguise && p[1] === 'q' && v.board[sq] !== p[0] + 'p') throw new Error(`${ctx}: disguise at ${sq} visible to ${viewer}`);
+      if (m.fake && v.marks[sq]?.fake) throw new Error(`${ctx}: imposter at ${sq} visible to ${viewer}`);
+    }
+    if (v.inv[other(viewer)].some(i => i.kind)) throw new Error(`${ctx}: opponent hand visible`);
+  }
+  for (const [sq, m] of Object.entries(st.marks)) if (m.disguise && st.board[sq]?.[1] === 'q' && (rankOf(sq) === 0 || rankOf(sq) === 7) && st.status === 'playing') throw new Error(`${ctx}: disguise on back rank ${sq}`);
 }
 
 function randomAction(st) {
   const c = st.turn;
+  const inv = st.inv[c];
+  if (inv.length >= 2 && Math.random() < 0.08) {
+    const [x, y] = [...inv].sort(() => Math.random() - 0.5);
+    if (fusionOf(x.kind, y.kind)) return { type: 'fuse', ids: [x.id, y.id] };
+  }
+  if (inv.length && Math.random() < 0.03) return { type: 'discard', id: pick(inv).id };
   if (!itemAllowed(st, c) && Math.random() < 0.5) {
     const usable = st.inv[c].filter(i => itemUsable(st, c, i.kind));
     if (usable.length) {
@@ -45,7 +62,8 @@ for (const mode of ['classic', 'chaos', 'weapons', 'cards']) {
         throw e;
       }
       actions++;
-      if (a.type === 'item') { itemsUsed++; const k = st.history.at(-1).item; counts[k] = (counts[k] || 0) + 1; }
+      if (a.type === 'item' && st.history.at(-1)?.item) { itemsUsed++; const k = st.history.at(-1).item; counts[k] = (counts[k] || 0) + 1; }
+      for (const f of fx) if (['fuse', 'discard', 'quest-done', 'reveal', 'imposter'].includes(f.k)) counts[f.k] = (counts[f.k] || 0) + 1;
       events += fx.filter(f => f.k === 'event').length;
       fx.filter(f => f.k === 'event').forEach(f => (counts['ev:' + f.id] = (counts['ev:' + f.id] || 0) + 1));
       check(st, `${mode} game ${g} action ${i} ${JSON.stringify(a)}`);

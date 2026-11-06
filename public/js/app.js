@@ -4,7 +4,8 @@ import { Board, pieceInline } from './board.js';
 import { sfx, isMuted, setMuted } from './sound.js';
 import { Net } from './net.js';
 import { newGame, applyAction, viewFor, fxFor, legalMoves, itemAllowed, MODES } from '/shared/game.js';
-import { ITEMS, itemStep, itemUsable } from '/shared/items.js';
+import { ITEMS, itemStep, itemUsable, fusionOf } from '/shared/items.js';
+import { QUESTS, questTurnsLeft } from '/shared/quests.js';
 import { EVENTS } from '/shared/events.js';
 import { inCheck, kingSq, other, VALUE, NAMES } from '/shared/rules.js';
 import { botAction } from '/shared/bot.js';
@@ -24,7 +25,20 @@ const store = {
 const rid = () => (crypto.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now().toString(36)).replace(/-/g, '');
 const CAT = { power: 'var(--coral)', weapon: 'var(--blue)', card: 'var(--violet)' };
 const CAT_HEX = { power: '#FF5A36', weapon: '#2E6BFF', card: '#7B5CFF' };
+// How each mode's item pool is named and coloured in the UI (Chaos mixes all three).
+const POOL_UI = {
+  power: { many: 'power-ups', one: 'power-up', icon: 'sparkles', color: 'var(--coral)', title: 'Your power-ups' },
+  weapon: { many: 'weapons', one: 'weapon', icon: 'swords', color: 'var(--blue)', title: 'Your weapons' },
+  card: { many: 'cards', one: 'card', icon: 'layers', color: 'var(--violet)', title: 'Your hand' },
+  mixed: { many: 'items', one: 'item', icon: 'sparkles', color: 'var(--ink-2)', title: 'Your items' },
+};
 const VPAL = { power: PAL.fire, weapon: PAL.blue, card: PAL.violet };
+const CAPTURE_STYLE = { power: 'fire', weapon: 'plasma', card: 'nova' };
+const BOOM_STYLE = { rocket: 'mushroom', mine: 'dirt', shotgun: 'nova', laser: 'plasma' };
+// Extra time some effects need on top of the normal 1.1s beat.
+const EFFECT_EXTRA = { hyperbeam: 900, orbital: 900, storm: 800, zero: 500, ascension: 700, shadowarmy: 500, timestop: 500, slash: 200, thunder: 200 };
+// Big moments play in slow motion at this speed.
+const SLOW = 0.55;
 const MODE_ICON = { classic: 'crown', chaos: 'flame', weapons: 'swords', cards: 'layers' };
 const COLOR_NAME = { w: 'White', b: 'Black' };
 
@@ -124,11 +138,12 @@ class GameView {
   }
 
   destroy() {
+    this.endReplay?.();
     this.timers.forEach(clearTimeout);
     document.removeEventListener('keydown', this.keyHandler);
   }
 
-  later(ms, fn) { this.timers.push(setTimeout(fn, ms)); }
+  later(ms, fn) { this.timers.push(setTimeout(fn, ms / (this.slow || 1))); }
 
   /** The color this screen acts as (the side to move in pass & play). */
   get me() { return this.ctl.perspective(this.view); }
@@ -143,6 +158,7 @@ class GameView {
   flushIdle() { const cbs = this.idleCbs; this.idleCbs = []; cbs.forEach(fn => fn()); }
 
   reset(view) {
+    this.endReplay?.();
     this.vfx.clear();
     this.timers.forEach(clearTimeout);
     this.timers = [];
@@ -176,32 +192,48 @@ class GameView {
     // Each item use and each random event becomes its own beat:
     //   announce -> lock onto targets -> effect, so you can follow what happened.
     const phases = [[]];
-    for (const f of fx) { if (f.k === 'event' || f.k === 'item') phases.push([f]); else phases.at(-1).push(f); }
-    let t = 0;
+    const HEADS = new Set(['event', 'item', 'fuse', 'quest-done']);
+    for (const f of fx) { if (HEADS.has(f.k) || (f.k === 'reveal' && f.blocked)) phases.push([f]); else phases.at(-1).push(f); }
+    let t = 0, prevBoard = this.board.pieces && Object.fromEntries(Object.entries(this.board.pieces).map(([sq, el]) => [sq, el.dataset.code]));
     phases.forEach((ph, i) => {
       if (!ph.length) return;
       const boardAt = phases[i + 1]?.[0]?.before || view.board;
+      const before = ph[0].before || prevBoard;
+      prevBoard = boardAt;
       const head = ph[0];
+      // Play the beat once. Big moments play that one time in slow motion with a cinematic camera.
+      const run = (len, big) => {
+        if (big) { this.later(t, () => this.cinematic(ph, boardAt, len)); t += Math.round(len / SLOW) + 150; }
+        else { this.later(t, () => this.playPhase(ph, boardAt)); t += len; }
+      };
       if (head.k === 'event') {
         this.later(t, () => this.eventCutin(head, 1600));
         t += 1650;
-        this.later(t, () => this.playPhase(ph, boardAt));
-        t += 1100;
+        const hole = head.id === 'blackhole';
+        run(hole ? 2000 : 1100, hole && ph.some(f => f.k === 'hole' && f.eaten?.length));
       } else if (head.k === 'item') {
         const def = ITEMS[head.kind];
         const mine = head.color === this.me && this.ctl.kind !== 'hotseat';
-        const lead = mine ? 1250 : 1650;
+        const lead = (mine ? 1250 : 1650) + (def.legendary ? 350 : 0);
         this.later(t, () => this.itemCutin(head, lead));
         t += lead;
         if (head.sqs.length) {
           this.later(t, () => { this.board.lockOn(head.sqs, CAT_HEX[def.cat], 450); sfx.lock(); });
           t += 550;
         }
-        this.later(t, () => this.playPhase(ph, boardAt));
-        t += 1100;
+        // slow motion for legendaries, and for powers that take down a queen or rook
+        run(1100 + (EFFECT_EXTRA[head.kind] || 0), def.legendary || ph.some(f => f.k === 'capture' && 'qr'.includes(before?.[f.sq]?.[1])));
+      } else if (head.k === 'fuse') {
+        this.later(t, () => this.fusionScene(head, 2600));
+        t += 2700;
+        run(300, false);
+      } else if (head.k === 'quest-done') {
+        this.later(t, () => this.questCutin(head, 1700));
+        t += 1750;
+        const asc = ph.some(f => f.k === 'ascend');
+        run(asc ? 1900 : 900, asc);
       } else {
-        this.later(t, () => this.playPhase(ph, boardAt));
-        t += ph.some(f => f.k === 'moves' || f.k === 'boom') ? 500 : 200;
+        run(ph.some(f => f.k === 'reveal' || f.k === 'imposter') ? 1000 : ph.some(f => f.k === 'moves' || f.k === 'boom') ? 500 : 200, false);
       }
     });
     this.busyUntil = Date.now() + t;
@@ -242,10 +274,10 @@ class GameView {
    * Full-screen anime cut-in: a diagonal band slams in with speed lines, a giant piece and the move name.
    * Tap to skip.
    */
-  cutin({ kind, who, name, desc, ic, cat, sting, piece, event = false, hold = 1400 }) {
+  cutin({ kind, who, name, desc, ic, cat, sting, piece, event = false, legendary = false, quest = false, hold = 1400 }) {
     document.querySelector('.cutin')?.remove();
     const el = document.createElement('div');
-    el.className = 'cutin' + (event ? ' event' : '') + (piece ? '' : ' no-piece');
+    el.className = 'cutin' + (event ? ' event' : '') + (piece ? '' : ' no-piece') + (legendary ? ' legendary' : '') + (quest ? ' quest' : '');
     const lines = Array.from({ length: 22 }, () => `<i style="top:${(Math.random() * 100).toFixed(1)}%;left:${(Math.random() * 90).toFixed(1)}%;width:${(8 + Math.random() * 26).toFixed(1)}%"></i>`).join('');
     el.innerHTML = `<div class="ci-dim"></div><div class="ci-band" style="--cat:${cat}"><div class="ci-lines">${lines}</div>
       ${piece ? `<div class="ci-piece">${pieceInline(piece)}</div>` : ''}
@@ -276,6 +308,9 @@ class GameView {
       band.animate([{ transform: `${BAND_IN} translate(10px, -6px)` }, { transform: `${BAND_IN} translate(-8px, 5px)` }, { transform: BAND_IN }], { duration: 200 });
       sfx.slam();
       if (sting) sfx.sting(sting);
+      if (legendary || quest) { // a second, harder impact frame for the big ones
+        setTimeout(() => { el.animate([{ filter: 'invert(1) hue-rotate(180deg)' }, { filter: 'none' }], { duration: 180 }); sfx.legendary(); }, 230);
+      }
     }, 420);
     let gone = false;
     const exit = () => {
@@ -295,9 +330,106 @@ class GameView {
     const piece = f.sqs.length && f.before?.[f.sqs[0]];
     this.cutin({
       kind: f.kind, who, name: def.name, ic: def.icon, cat: CAT_HEX[def.cat], sting: def.cat, hold,
-      desc: secret ? 'A hidden mine is somewhere in the middle of the board…' : def.desc,
-      piece: piece || null,
+      desc: secret ? (def.secretDesc || 'A hidden mine is somewhere in the middle of the board…') : def.desc,
+      piece: piece || null, legendary: !!def.legendary,
     });
+  }
+
+  questCutin(f, hold) {
+    const q = QUESTS[f.kind], who = this.ctl.label(f.color, this.me);
+    this.cutin({ who: `${who} · Quest complete!`, name: q.name, desc: `Reward: ${q.reward}`, ic: 'trophy', cat: '#E0A100', sting: 'event', quest: true, hold });
+    setTimeout(() => sfx.quest(), 380);
+  }
+
+  /** Two cards fly in, collide, and a legendary comes out. The opponent only sees card backs. */
+  fusionScene(f, hold) {
+    document.querySelector('.fusion')?.remove();
+    const mine = !!f.result, def = mine && ITEMS[f.result];
+    const back = `<div class="fz-back">${icon('combine', 52)}</div>`;
+    const card = k => (k ? cardSVG(k) : back);
+    const el = document.createElement('div');
+    el.className = 'fusion';
+    const lines = Array.from({ length: 26 }, (_, i) => `<i style="transform:rotate(${(i / 26) * 360}deg)"></i>`).join('');
+    el.innerHTML = `<div class="fz-dim"></div><div class="fz-rays">${lines}</div>
+      <div class="fz-card fz-a">${card(f.a)}</div><div class="fz-card fz-b">${card(f.b)}</div>
+      <div class="fz-ring"></div><div class="fz-flash"></div>
+      <div class="fz-result">${card(f.result)}<div class="shine"><i></i></div></div>
+      <div class="fz-text"><div class="fz-k">${mine ? 'Fusion!' : `${esc(this.ctl.label(f.color, this.me))} fused two items`}</div><div class="fz-name">${mine ? esc(def.name) : 'A legendary!'}</div></div>`;
+    document.body.appendChild(el);
+    const q = sel => el.querySelector(sel), E = 'cubic-bezier(.2,.8,.2,1)';
+    q('.fz-dim').animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'both' });
+    // 1. the two cards slide in from the sides, shaking with energy
+    q('.fz-a').animate([{ transform: 'translate(-70vw, 10vh) rotate(-35deg)' }, { transform: 'translate(-21vmin, 0) rotate(-10deg)', offset: 0.35 }, { transform: 'translate(-19vmin, 0) rotate(-8deg)', offset: 0.55 }, { transform: 'translate(-22vmin, 0) rotate(-11deg)', offset: 0.7 }, { transform: 'translate(0, 0) rotate(160deg) scale(.5)', opacity: 1, offset: 0.97 }, { transform: 'translate(0,0) scale(.2)', opacity: 0 }], { duration: 1000, easing: 'ease-in', fill: 'both' });
+    q('.fz-b').animate([{ transform: 'translate(70vw, -10vh) rotate(35deg)' }, { transform: 'translate(21vmin, 0) rotate(10deg)', offset: 0.35 }, { transform: 'translate(19vmin, 0) rotate(8deg)', offset: 0.55 }, { transform: 'translate(22vmin, 0) rotate(11deg)', offset: 0.7 }, { transform: 'translate(0, 0) rotate(-160deg) scale(.5)', opacity: 1, offset: 0.97 }, { transform: 'translate(0,0) scale(.2)', opacity: 0 }], { duration: 1000, easing: 'ease-in', fill: 'both' });
+    q('.fz-rays').animate([{ transform: 'rotate(0) scale(.6)', opacity: 0 }, { opacity: 0.9, offset: 0.4 }, { transform: 'rotate(40deg) scale(1.2)', opacity: 0.6 }], { duration: hold, delay: 900, fill: 'both' });
+    sfx.fuse();
+    // 2. impact: flash, shockwave, the result card flips out
+    setTimeout(() => {
+      q('.fz-flash').animate([{ opacity: 1 }, { opacity: 0 }], { duration: 420, fill: 'both' });
+      q('.fz-ring').animate([{ transform: 'translate(-50%,-50%) scale(.2)', opacity: 1 }, { transform: 'translate(-50%,-50%) scale(4)', opacity: 0 }], { duration: 700, easing: 'ease-out', fill: 'both' });
+      el.animate([{ transform: 'translate(10px,-8px)' }, { transform: 'translate(-8px,6px)' }, { transform: 'none' }], { duration: 220 });
+      q('.fz-result').animate([{ transform: 'rotateY(180deg) scale(.2)', opacity: 0 }, { transform: 'rotateY(-12deg) scale(1.15)', opacity: 1, offset: 0.6 }, { transform: 'rotateY(0) rotate(-3deg) scale(1)', opacity: 1 }], { duration: 650, easing: E, fill: 'both' });
+      q('.fz-result .shine i').animate([{ left: '-30%' }, { left: '130%' }], { duration: 500, delay: 650, fill: 'both' });
+      q('.fz-text').animate([{ transform: 'skewX(-10deg) scale(2.6)', opacity: 0 }, { transform: 'skewX(-10deg) scale(1)', opacity: 1 }], { duration: 220, delay: 250, easing: 'cubic-bezier(.6,0,.9,.4)', fill: 'both' });
+    }, 980);
+    let gone = false;
+    const exit = () => {
+      if (gone) return; gone = true;
+      el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, fill: 'forwards' }).onfinish = () => el.remove();
+    };
+    setTimeout(exit, hold - 260);
+    el.onclick = exit;
+  }
+
+  /** Square to point the replay camera at. */
+  focusOf(ph) {
+    for (const f of ph) {
+      if (f.k === 'hyperbeam') return f.from;
+      if (f.sq) return f.sq;
+      if (f.k === 'item' && f.sqs?.length) return f.sqs.at(-1);
+      if (f.sqs?.length) return f.sqs[0];
+    }
+    return null;
+  }
+
+  /**
+   * A big moment, played once in slow motion: letterbox bars slide in, the camera pushes in on the
+   * action, and the beat runs at SLOW speed (effects, board animations and their timing), then snaps back.
+   */
+  cinematic(ph, boardAt, len) {
+    const wrap = $('.board-wrap'), b = this.board;
+    const focus = this.focusOf(ph);
+    const lb = document.createElement('div');
+    lb.className = 'letterbox';
+    lb.innerHTML = '<i class="lb-top"></i><i class="lb-bot"></i>';
+    document.body.appendChild(lb);
+    if (focus) {
+      const [x, y] = b.center(focus);
+      wrap.style.transformOrigin = `${b.el.offsetLeft + x}px ${b.el.offsetTop + y}px`;
+    }
+    wrap.classList.add('replaying');
+    let live = true;
+    const slowAll = () => { // board animations started during the moment run slowed down too
+      if (!live) return;
+      for (const a of wrap.getAnimations({ subtree: true })) if (a.playbackRate === 1) a.playbackRate = SLOW;
+      requestAnimationFrame(slowAll);
+    };
+    this.endReplay = () => {
+      if (!live) return;
+      live = false;
+      this.slow = 1; this.vfx.timeScale = 1;
+      wrap.classList.remove('replaying'); wrap.style.transformOrigin = '';
+      lb.remove();
+      this.endReplay = null;
+    };
+    this.vfx.timeScale = SLOW;
+    requestAnimationFrame(slowAll);
+    this.slow = SLOW;
+    this.playPhase(ph, boardAt);
+    this.slow = 1;
+    const total = Math.round(len / SLOW);
+    this.later(total - 380, () => { wrap.classList.remove('replaying'); lb.classList.add('out'); });
+    this.later(total, () => this.endReplay?.());
   }
 
   eventCutin(ev, hold) {
@@ -309,7 +441,7 @@ class GameView {
     const wrap = $('.board-wrap');
     wrap.querySelector('.stamp')?.remove();
     const el = document.createElement('div');
-    el.className = 'stamp' + (mate ? ' mate' : '') + (variant ? ` ${variant}` : '');
+    el.className = 'stamp' + (mate ? ' mate' : '') + (variant ? ` ${variant}` : '') + (text.length > 11 ? ' long' : '');
     el.innerHTML = `<span>${esc(text)}</span>`;
     wrap.appendChild(el);
     const base = 'translate(-50%, -50%) rotate(-8deg)';
@@ -333,14 +465,14 @@ class GameView {
     const v = this.view, pool = MODES[v.mode].pool;
     if (!pool) return;
     const me = this.me;
-    const noun = { power: 'power-ups', weapon: 'weapons', card: 'cards' }[pool];
+    const noun = POOL_UI[pool].many;
     const chips = list => list.map(it => { const d = ITEMS[it.kind]; return `<span class="co-chip" style="--cat:${CAT[d.cat]}"><span>${icon(d.icon)}</span>${esc(d.name)}</span>`; }).join('');
     const items = this.ctl.kind === 'hotseat' ? v.inv.w : v.inv[me] || [];
     this.callout({
-      icon: { power: 'sparkles', weapon: 'swords', card: 'layers' }[pool], cat: CAT[pool], hold: 4200, tap: true,
+      icon: POOL_UI[pool].icon, cat: POOL_UI[pool].color, hold: 4200, tap: true,
       kicker: this.ctl.kind === 'hotseat' ? `Each side starts with ${items.length} ${noun}` : `You start with ${items.length} ${noun}`,
       title: 'Your items',
-      desc: `They sit under the board next to your name. On your turn, tap one to use it${pool === 'power' ? ', and grab the yellow crates to earn more' : ''}.`,
+      desc: `They sit under the board next to your name. On your turn, tap one to use it${MODES[v.mode].crates ? ', and grab the yellow crates to earn more' : ''}.${pool === 'mixed' ? ' Chaos mixes power-ups, weapons and cards, so you get extra fusion combos.' : ''}`,
       html: `<div class="co-list">${chips(items)}</div>`,
     });
   }
@@ -377,7 +509,12 @@ class GameView {
     const batches = fx.filter(f => f.k === 'moves').map(f => ({ list: f.list, style: f.style }));
     const removeDelay = {};
     let soundMove = batches.length > 0, captured = false;
+    const storm = fx.some(f => f.k === 'storm');
     for (const f of fx) {
+      if (f.k === 'boom' && f.kind === 'thunder') f.sqs.forEach((s, i) => (removeDelay[s] = storm ? 90 + i * 300 : 120));
+      if (f.k === 'boom' && f.kind === 'slash') f.sqs.forEach((s, i) => (removeDelay[s] = 170 + i * 70));
+      if (f.k === 'boom' && f.kind === 'hyperbeam') f.sqs.forEach((s, i) => (removeDelay[s] = 680 + i * 110));
+      if (f.k === 'boom' && f.kind === 'orbital') f.sqs.forEach(s => (removeDelay[s] = 650));
       if (f.k === 'meteor') f.sqs.forEach((s, i) => (removeDelay[s] = 520 + i * 180));
       if (f.k === 'rocket') removeDelay[f.to] = 420;
       if (f.k === 'laser') removeDelay[f.to] = 520;
@@ -404,7 +541,8 @@ class GameView {
           // plain captures stay plain; only captures made with a power get the big hit
           const item = fx.find(x => x.k === 'item');
           if (item) {
-            this.vfx.capture(f.sq, { delay: 150, power: true, pal: VPAL[ITEMS[item.kind].cat] });
+            const cat = ITEMS[item.kind].cat;
+            this.vfx.capture(f.sq, { delay: 150, power: true, pal: VPAL[cat], style: CAPTURE_STYLE[cat] });
             this.later(170, () => b.impact(f.sq, 2));
           }
           break;
@@ -419,7 +557,7 @@ class GameView {
           this.recentColor = CAT_HEX[def.cat];
           f.sqs.forEach(s => b.ring(s, CAT_HEX[def.cat], 0, 2));
           if (f.kind === 'ghost' && f.sqs.length === 2) this.later(700, () => b.ring(f.sqs[1], '#FF5A36', 0, 1.8));
-          if (!f.sqs.length && def.cat === 'card') { b.flash('#E6DEFF', 700); this.stamp(`${def.name}!`, false, 'card'); }
+          if (!f.sqs.length && def.cat === 'card' && !def.legendary) { b.flash('#E6DEFF', 700); this.stamp(`${def.name}!`, false, 'card'); } // legendaries stamp their own
           this.signature(f);
           sfx.item(f.kind);
           break;
@@ -432,10 +570,15 @@ class GameView {
           break;
         case 'aura': this.aura(f); this.recent.push(...f.sqs); break;
         case 'boom':
+          if (['thunder', 'slash', 'hyperbeam', 'orbital'].includes(f.kind)) { // these draw their own blasts
+            f.sqs.forEach(s => b.impact(s, f.kind === 'slash' ? 1 : 2, removeDelay[s] || 0));
+            soundMove = false;
+            break;
+          }
           f.sqs.forEach((s, i) => {
             const d = (f.kind === 'mine' ? 300 : f.kind === 'laser' ? 520 : f.kind === 'rocket' ? 420 : 0) + i * 70;
             if (f.kind === 'hole') { this.vfx.blackhole(s, [], { dur: 1.1, scale: 0.75 }); return; }
-            this.vfx.explosion(s, { delay: d, scale: f.kind === 'rocket' || f.kind === 'mine' ? 1.25 : f.kind === 'shotgun' ? 0.8 : 1, pal: f.kind === 'laser' ? PAL.blue : PAL.fire });
+            this.vfx.explosion(s, { delay: d, scale: f.kind === 'rocket' || f.kind === 'mine' ? 1.25 : f.kind === 'shotgun' ? 0.8 : 1, pal: f.kind === 'laser' ? PAL.blue : PAL.fire, style: BOOM_STYLE[f.kind] || 'fire' });
             b.impact(s, f.kind === 'rocket' || f.kind === 'mine' ? 2 : 1, d);
           });
           if (f.from) b.muzzle(f.from, f.sqs);
@@ -457,8 +600,8 @@ class GameView {
           const from = f.why === 'crate' ? fx.find(x => x.k === 'pickup')?.sq : null;
           if (f.kind && (f.color === me || this.ctl.kind === 'hotseat')) {
             const def = ITEMS[f.kind];
-            const why = { crate: 'From the crate', draw: 'New item', mimic: 'Mimicked', wildcard: 'Wildcard became' }[f.why] || 'New item';
-            this.later(250, () => { this.flyItem(f.kind, from, this.ctl.kind === 'hotseat' ? this.ctl.orientation(v) : f.color); sfx.gain(); });
+            const why = { crate: 'From the crate', draw: 'New item', mimic: 'Mimicked', wildcard: 'Wildcard became', fuse: 'Fused into', quest: 'Quest reward' }[f.why] || 'New item';
+            if (f.why !== 'fuse') this.later(250, () => { this.flyItem(f.kind, from, this.ctl.kind === 'hotseat' ? this.ctl.orientation(v) : f.color); sfx.gain(); });
             toast(`${why}: ${def.name}`, { ic: def.icon, color: CAT[def.cat] });
             this.later(1150, () => { $('#hand-wrap').classList.add('got-item'); this.later(1600, () => $('#hand-wrap').classList.remove('got-item')); });
           } else {
@@ -468,11 +611,91 @@ class GameView {
           break;
         }
         case 'bonus': {
-          const what = { skip: 'skipped turn', double: 'Double Move', reverse: 'Reverse' }[f.kind] || 'bonus';
+          const what = { skip: 'skipped turn', double: 'Double Move', reverse: 'Reverse', stop: 'Time Stop' }[f.kind] || 'bonus';
           toast(f.color === me ? `Bonus turn (${what})!` : `${who(f.color)} gets a bonus turn (${what})`, { ic: 'fast-forward', color: 'var(--violet)' });
           break;
         }
         case 'rewind': b.flash('#7B5CFF', 600); toast('Time rewound!', { ic: 'rewind', color: 'var(--coral)' }); sfx.event(); break;
+        case 'thunder':
+          this.vfx.strike(f.sq);
+          b.glow(f.sqs, '#2E6BFF', 1000);
+          f.sqs.forEach((s, i) => this.later(240 + i * 50, () => this.vfx.pop(s, PAL.blue, { scale: 0.6 })));
+          this.recent.push(...f.sqs); this.recentColor = '#2E6BFF';
+          break;
+        case 'storm':
+          f.sqs.forEach((s, i) => this.vfx.strike(s, { delay: i * 300, big: true }));
+          if (!f.sqs.length) toast('The storm found no targets', { ic: 'cloud-lightning' });
+          break;
+        case 'slash':
+          this.vfx.slash(f.from, f.area, f.sqs);
+          [0, 90, 180].forEach(d => this.later(d + 60, () => sfx.slashHit()));
+          this.later(120, () => b.shake(6));
+          break;
+        case 'hyperbeam':
+          this.vfx.hyperbeam(f.from, f.to, f.sqs);
+          this.later(560, () => { b.impact(f.from, 2); b.shake(10); });
+          this.later(900, () => b.shake(8));
+          break;
+        case 'orbital':
+          this.vfx.orbital(f.sq, f.area);
+          this.later(620, () => { b.impact(f.sq, 2); b.shake(14); });
+          this.later(900, () => b.shake(8));
+          break;
+        case 'zero':
+          this.vfx.zero(f.sq, f.sqs, f.area);
+          this.later(300, () => b.glow(f.sqs.length ? f.sqs : f.area, '#8FC8FF', 1400));
+          this.recent.push(...f.sqs); this.recentColor = '#8FC8FF';
+          break;
+        case 'aegis':
+          this.vfx.aegis(f.sq, f.sqs);
+          f.sqs.forEach((s, i) => this.later(200 + i * 60, () => b.hexShield(s)));
+          break;
+        case 'ascend':
+          this.vfx.ascend(f.sq);
+          // the Ascension card already played its sound when used; quest rewards get theirs here
+          this.later(720, () => { this.stamp('Ascend!', false, 'gold'); b.impact(f.sq, 2); if (f.quest) sfx.item('ascension'); });
+          break;
+        case 'arise':
+          f.sqs.forEach((s, i) => this.vfx.shadowRise(s, i * 260));
+          this.later(700, () => this.stamp('Arise!', false, 'shadow'));
+          break;
+        case 'timestop':
+          this.vfx.timestop();
+          this.later(150, () => $('.board-wrap').animate([{ filter: 'none' }, { filter: 'invert(1) hue-rotate(180deg) saturate(1.4)', offset: 0.15 }, { filter: 'invert(1) hue-rotate(180deg) saturate(1.4)', offset: 0.55 }, { filter: 'none' }], { duration: 1100 }));
+          this.later(200, () => this.stamp('Time stop!', false, 'card'));
+          break;
+        case 'hypno': this.vfx.hypno(f.sq); break;
+        case 'imposter-in':
+          f.sqs.forEach((s, i) => { b.smoke(s, i * 60); this.vfx.poof(s, { big: false }); });
+          this.later(500, () => this.stamp('Which one is real?', false, 'card'));
+          break;
+        case 'imposter':
+          f.sqs.forEach((s, i) => this.later(i * 120, () => { this.vfx.poof(s); b.smoke(s); }));
+          this.later(250, () => { this.stamp('Imposter!', false, 'shadow'); sfx.imposterPop(); });
+          break;
+        case 'reveal':
+          f.sqs.forEach((s, i) => this.later(i * 120, () => { this.vfx.poof(s, { pal: PAL.gold }); b.impact(s, 1); }));
+          this.later(220, () => {
+            this.stamp(f.gone ? 'It was a queen!' : f.blocked ? 'Disguised queen!' : 'Unmasked!', false, 'gold');
+            sfx.reveal();
+          });
+          if (f.blocked) toast('That “pawn” was a queen in disguise! Your move didn’t happen, try again.', { ic: 'eye', color: 'var(--violet)' });
+          break;
+        case 'quest': {
+          const q = QUESTS[f.kind];
+          if (f.reset) { if (f.color === me) toast('Iron Wall reset: you lost a piece. Back to 0.', { ic: 'shield-plus', color: 'var(--red)' }); }
+          else if (f.n < f.goal) { toast(`${f.color === me ? 'Quest' : `${who(f.color)}’s quest`}: ${q.name} ${f.n}/${f.goal}`, { ic: q.icon, color: '#E0A100' }); if (f.color === me) sfx.questTick(); }
+          break;
+        }
+        case 'quest-new': {
+          const q = QUESTS[f.kind];
+          const why = f.why === 'impossible' ? 'Your old quest can’t be done any more. ' : f.why === 'expired' ? 'Your quest expired. ' : '';
+          toast(f.color === me ? `${why}New quest: ${q.desc}` : `${who(f.color)} got a new quest: ${q.name}`, { ic: q.icon, color: '#E0A100' });
+          break;
+        }
+        case 'discard':
+          if (f.color !== me) toast(`${who(f.color)} discarded an item`, { ic: 'trash-2' });
+          break;
         case 'toast': toast(f.text, { ic: f.icon || 'sparkle' }); break;
         case 'over': break;
       }
@@ -514,6 +737,7 @@ class GameView {
       steal: () => f.sqs.forEach(s => { b.ring(s, '#FF5A36', 0, 1.8); b.burst(s, ['#FF5A36', '#1D1B18'], 10); }),
       zombie: () => { f.sqs.forEach((s, i) => this.vfx.shadowRise(s, i * 250)); if (f.sqs.length) this.later(800, () => this.stamp('Arise!', false, 'shadow')); },
       mutate: () => f.sqs.forEach((s, i) => { this.vfx.magic(s, PAL.green, { R: 0.9, n: 5, delay: i * 200 }); this.vfx.pop(s, PAL.green, { delay: 300 + i * 200 }); }),
+      disguise: () => f.sqs.forEach(s => { b.smoke(s); this.vfx.poof(s, { big: false }); }),
       reverse: () => b.flash('#E6DEFF', 500),
       skip: () => b.flash('#E6DEFF', 500),
       double: () => b.flash('#E6DEFF', 500),
@@ -545,17 +769,20 @@ class GameView {
     const mat = x => v.captured[x].reduce((s, t) => s + VALUE[t], 0);
     const adv = mat(other(c)) - mat(c);
     const hidden = this.ctl.kind !== 'hotseat' && c !== this.me && MODES[v.mode].pool;
-    const cat = { power: 'var(--coral)', weapon: 'var(--blue)', card: 'var(--violet)' }[MODES[v.mode].pool];
+    const cat = POOL_UI[MODES[v.mode].pool]?.color;
     const backs = hidden ? `<div class="backs" title="${v.inv[c].length} item(s)" style="--cat:${cat}">${v.inv[c].map(() => '<i></i>').join('')}</div>` : '';
     const showTray = MODES[v.mode].pool && (this.ctl.kind === 'hotseat' ? c === this.ctl.orientation(v) : c === this.me);
     const tray = showTray ? `<div class="tray">${(this.handState || []).map(h => `<button class="tray-it ${h.def.cat}${h.usable ? ' ready' : ' off'}${h.fresh ? ' drawn' : ''}${this.pick?.item.id === h.it.id ? ' active' : ''}" data-tray="${h.it.id}" aria-disabled="${!h.usable}" title="${esc(h.def.name)}: ${esc(h.def.desc)} (hold for details)" aria-label="${esc(h.def.name)}">${icon(h.def.icon)}</button>`).join('')}</div>` : '';
     const turn = v.status === 'playing' && v.turn === c
       ? (c === this.me || this.ctl.kind === 'hotseat' ? '<span class="turn-pill"><i></i>To move</span>' : `<span class="turn-pill think"><span class="waiting-dots"><i></i><i></i><i></i></span>${info.thinking}</span>`)
       : '';
+    const q = v.quests?.[c], qd = q && QUESTS[q.kind];
+    const quest = qd ? `<button class="quest-pill${q.done ? ' done' : ''}" data-quest="${c}" title="${esc(qd.name)}: ${esc(qd.desc)}. Reward: ${esc(qd.reward)}">${icon(q.done ? 'trophy' : qd.icon)}<span>${q.done ? 'Done' : `${q.n}/${q.goal}`}</span></button>` : '';
     el.innerHTML = `
       <span class="avatar ${c}">${pieceInline(c + 'k')}</span>
-      <div class="who"><span class="name">${esc(info.name)}</span><span class="sub">${info.status}</span></div>
+      <div class="who"><span class="name">${esc(info.name)}${quest}</span><span class="sub">${info.status}</span></div>
       <div class="right"><div class="captured">${glyphs}${adv > 0 ? `<span class="adv">+${adv}</span>` : ''}</div>${backs}${tray}${turn}</div>`;
+    $$('[data-quest]', el).forEach(btn => (btn.onclick = () => this.questInfo()));
     $$('[data-tray]', el).forEach(btn => {
       const h = () => this.handState.find(x => x.it.id === +btn.dataset.tray);
       // tap = use (or details if it can't be used right now), hold = details
@@ -590,9 +817,9 @@ class GameView {
       mine = true;
       t = inCheck(v, me) ? 'Check!' : v.bonus ? 'Bonus turn!' : 'Your move';
       const ready = (this.handState || []).filter(h => h.usable).length;
-      const noun = { power: 'power-up', weapon: 'weapon', card: 'card' }[MODES[v.mode].pool];
+      const noun = POOL_UI[MODES[v.mode].pool]?.one || 'item';
       s = inCheck(v, me) ? 'Get your king out of danger' : v.bonus?.kind === 'double' ? 'Second move: a different piece'
-        : ready ? `Move a piece, or use a ${noun} (${ready} ready)` : `Move ${v.full} · you play ${COLOR_NAME[me]}`;
+        : ready ? `Move a piece, or use ${/^[aeiou]/.test(noun) ? 'an' : 'a'} ${noun} (${ready} ready)` : `Move ${v.full} · you play ${COLOR_NAME[me]}`;
     } else {
       t = me ? `${this.ctl.player(v.turn, me).name} is thinking` : `${COLOR_NAME[v.turn]} to move`;
       s = `Move ${v.full}`;
@@ -616,18 +843,19 @@ class GameView {
     if (!MODES[v.mode].pool) return;
     this.hidePeek();
     const items = (me && v.inv[me]) || [];
-    const title = { power: 'Your power-ups', weapon: 'Your weapons', card: 'Your hand' }[MODES[v.mode].pool];
+    const title = POOL_UI[MODES[v.mode].pool].title;
     $('#hand-title').textContent = this.ctl.kind === 'hotseat' ? `${COLOR_NAME[me]}'s items` : title;
     const block = this.handBlock;
     $('#hand-hint').textContent = items.length ? (block || 'Tap to use · hover for details') : '';
     hand.innerHTML = items.length ? this.handState.map(({ it, usable, fresh }) => {
       const d = ITEMS[it.kind];
-      return `<div class="item-slot" data-slot="${it.id}"><button class="item ${d.cat}${fresh ? ' drawn' : ''}${usable ? '' : ' off'}${this.pick?.item.id === it.id ? ' active' : ''}" data-item="${it.id}" aria-disabled="${!usable}">
+      const fusable = !d.legendary && this.handState.some(h => h.it.id !== it.id && ![null, 'random'].includes(fusionOf(it.kind, h.it.kind)));
+      return `<div class="item-slot" data-slot="${it.id}"><button class="item ${d.cat}${d.legendary ? ' legendary' : ''}${fresh ? ' drawn' : ''}${usable ? '' : ' off'}${this.pick?.item.id === it.id ? ' active' : ''}" data-item="${it.id}" aria-disabled="${!usable}">${fusable ? `<span class="i-fuse" title="Can fuse into a legendary">${icon('combine')}</span>` : ''}
         <span class="i-art">${cardSVG(it.kind, { thumb: true })}</span>
         <span class="i-top"><span class="i-name">${esc(d.name)}</span>${d.free ? '<span class="i-free">Free</span>' : ''}</span>
         <span class="i-desc">${esc(d.desc)}</span></button>
         <button class="i-more" data-more="${it.id}" aria-label="More about ${esc(d.name)}" title="Read more">${icon('info')}</button></div>`;
-    }).join('') : `<div class="hand-empty">${v.mode === 'chaos' ? 'Grab crates on the board to earn power-ups.' : 'No items right now. More arrive every few turns.'}</div>`;
+    }).join('') : `<div class="hand-empty">${v.mode === 'chaos' ? 'Grab crates on the board to earn items.' : 'No items right now. More arrive every few turns.'}</div>`;
     this.seenItems = new Set(items.map(i => i.id));
     const find = id => this.handState.find(h => h.it.id === +id);
     $$('.item', hand).forEach(btn => (btn.onclick = () => {
@@ -667,11 +895,45 @@ class GameView {
     if (el) el.hidden = true;
   }
 
+  fuse(h, otherId) {
+    const a = $(`#hand [data-item="${h.it.id}"]`), b = $(`#hand [data-item="${otherId}"]`);
+    [a, b].forEach(el => el?.classList.add('fusing'));
+    this.later(260, () => this.send({ type: 'fuse', ids: [h.it.id, otherId] }));
+  }
+
+  discard(h) {
+    const el = $(`#hand [data-item="${h.it.id}"]`) || $(`[data-tray="${h.it.id}"]`);
+    el?.classList.add('burning');
+    sfx.discard();
+    this.later(420, () => this.send({ type: 'discard', id: h.it.id }));
+  }
+
+  questInfo() {
+    const v = this.view;
+    const row = c => {
+      const q = v.quests?.[c];
+      if (!q) return '';
+      const d = QUESTS[q.kind], mine = c === this.me, left = questTurnsLeft(v, c);
+      return `<div class="quest-row${q.done ? ' done' : ''}"><span class="qr-ic">${icon(q.done ? 'trophy' : d.icon)}</span><div><div class="qr-k">${mine ? 'Your quest' : `${esc(this.ctl.player(c, this.me).name)}’s quest`}</div>
+        <b>${esc(d.name)}</b><p>${esc(d.desc)}</p><p class="qr-rw">${icon('gift')}${esc(d.reward)}</p>${left != null ? `<p class="qr-left">${icon('clock')}${left} turn${left === 1 ? '' : 's'} left</p>` : ''}</div><span class="qr-n">${q.done ? 'Done!' : `${q.n}/${q.goal}`}</span></div>`;
+    };
+    const me = this.me || 'w';
+    modal(`<h2>Quests</h2><p class="muted">Both players can see each other’s quest. Finish yours for a reward and a cut-scene. A new one arrives a couple of turns later.</p>
+      <div class="quest-list">${row(me)}${row(other(me))}</div>`);
+    sfx.click();
+  }
+
   /** "Read more" panel for an item in your hand. */
   itemInfo(h) {
     if (!h) return;
     const d = h.def, t = TIPS[h.it.kind] || {}, kind = { power: 'Power-up', weapon: 'Weapon', card: 'Card' }[d.cat];
     const why = !h.usable && (this.handBlock || 'No valid targets right now');
+    const canAct = !!this.view && this.view.status === 'playing' && this.view.turn === this.me && !this.pending && !this.busy;
+    const partners = (this.handState || []).filter(x => x.it.id !== h.it.id).map(x => [x, fusionOf(h.it.kind, x.it.kind)]).filter(([, r]) => r);
+    const fuseHtml = `<div class="fuse-box"><h5>${icon('combine')}Fuse</h5>${d.legendary ? '<p class="muted small">Legendaries can’t be fused.</p>'
+      : partners.length ? partners.map(([x, r]) => `<button class="fuse-opt" data-fuse="${x.it.id}" ${canAct ? '' : 'disabled'}><span class="fo-art">${cardSVG(x.it.kind, { thumb: true })}</span><span class="fo-txt"><b>+ ${esc(x.def.name)}</b><small>${r === 'random' ? 'Random legendary' : `→ ${esc(ITEMS[r].name)} (legendary)`}</small></span>${icon('arrow-right')}</button>`).join('')
+      : '<p class="muted small">Get another item to fuse with. Matching pairs make a specific legendary; any other pair makes a random one.</p>'}
+      ${partners.length && !canAct ? '<p class="muted small">You can fuse or discard on your turn.</p>' : ''}</div>`;
     const { card, close } = modal(`<div class="info" style="--cat:${CAT[d.cat]}">
       <div class="info-card">${cardSVG(h.it.kind)}</div>
       <div class="info-body">
@@ -681,8 +943,13 @@ class GameView {
         ${t.how ? `<h5>How to use</h5><p>${esc(t.how)}</p>` : ''}
         ${t.tip ? `<h5>Good to know</h5><p>${esc(t.tip)}</p>` : ''}
         ${d.free ? '<p class="muted small">Free actions don’t end your turn. Use it, then make your normal move.</p>' : ''}
-        <div class="info-actions">${h.picking ? '<button class="btn btn-primary" data-ok>Got it</button>' : h.usable ? `<button class="btn btn-primary" data-use>${icon(d.icon)}Use it</button>` : `<span class="info-why">${icon('clock')}${esc(why)}</span>`}</div>
+        <div class="info-actions">${h.picking ? '<button class="btn btn-primary" data-ok>Got it</button>' : h.usable ? `<button class="btn btn-primary" data-use>${icon(d.icon)}Use it</button>` : `<span class="info-why">${icon('clock')}${esc(why)}</span>`}
+          ${h.picking ? '' : `<button class="btn btn-ghost btn-danger" data-discard ${canAct ? '' : 'disabled'}>${icon('trash-2')}Discard</button>`}</div>
+        ${h.picking ? '' : fuseHtml}
       </div></div>`);
+    $$('[data-fuse]', card).forEach(btn => (btn.onclick = () => { close(); this.fuse(h, +btn.dataset.fuse); }));
+    const dis = $('[data-discard]', card);
+    if (dis) dis.onclick = () => { close(); this.discard(h); };
     const ok = $('[data-ok]', card);
     if (ok) ok.onclick = () => close();
     const use = $('[data-use]', card);
@@ -1210,13 +1477,17 @@ function howToModal() {
     <h3>Modes</h3>
     <ul>
       <li><b>Classic</b>: plain chess.</li>
-      <li><b>Chaos</b>: start with 2 power-ups, grab <b>crates</b> on the board for more, and survive random events every few turns.</li>
+      <li><b>Chaos</b>: everything at once. Power-ups, weapons and cards all drop (from <b>crates</b> on the board and every few turns), random events hit, and you can hold up to 5 items.</li>
       <li><b>Weapons</b>: start with 2 weapons and get another every 3 turns.</li>
       <li><b>Cards</b>: start with 3 cards and draw one every 2 turns.</li>
     </ul>
-    <h3>Power-ups (Chaos)</h3><div class="ref">${ref(items.filter(([, d]) => d.cat === 'power'))}</div>
-    <h3>Weapons</h3><div class="ref">${ref(items.filter(([, d]) => d.cat === 'weapon'))}</div>
-    <h3>Cards</h3><div class="ref">${ref(items.filter(([, d]) => d.cat === 'card'))}</div>
+    <h3>Fusion, quests and discarding</h3>
+    <p>Tap <b>ⓘ</b> on an item to <b>fuse</b> it with another one into a <b>legendary</b>. Matching pairs make a specific legendary; any other pair makes a random one. Chaos mixes all item types, so it has the most combos. You can also <b>discard</b> items you don't want.</p>
+    <p>Each player has a public <b>quest</b> (tap the badge next to a name). Finish it for a reward and a cut-scene.</p>
+    <h3>Power-ups</h3><div class="ref">${ref(items.filter(([, d]) => d.cat === 'power' && !d.legendary))}</div>
+    <h3>Weapons</h3><div class="ref">${ref(items.filter(([, d]) => d.cat === 'weapon' && !d.legendary))}</div>
+    <h3>Cards</h3><div class="ref">${ref(items.filter(([, d]) => d.cat === 'card' && !d.legendary))}</div>
+    <h3>Legendaries (fusion and quest rewards)</h3><div class="ref">${ref(items.filter(([, d]) => d.legendary))}</div>
     <h3>Random events (Chaos)</h3><div class="ref">${ref(Object.entries(EVENTS), 'event')}</div>
     <h3>Playing a friend</h3>
     <p>Click <b>Play with a Friend</b>, pick a mode and send the link. When you're both ready, colours are assigned and the game begins. If someone drops out, they can reopen the same link to pick up where they left off.</p></div>`);

@@ -25,4 +25,19 @@ export const TIPS = {
   steal: { how: 'Pick an enemy knight or bishop, or an enemy pawn in the middle of the board.', tip: 'It joins your side for good. Shielded pieces are safe from it.' },
   mimic: { how: 'No target. Just press Play.', tip: "You get a copy of a random item from your opponent's hand. They need to have at least one." },
   wildcard: { how: 'Press Play, then pick any power-up from the list.', tip: 'It turns into that power-up in your hand, ready to use.' },
+  imposter: { how: 'Pick your queen, then the empty square next to her where the copy appears.', tip: 'Half the time the real queen jumps to the new square, so even the squares give nothing away. The fake can’t capture, a fake "check" makes it pop, and it fades after 6 turns. Only you see the mask badge on it.' },
+  disguise: { how: 'Pick one of your pawns. Nobody else sees anything happen.', tip: 'It’s a real queen that looks like a pawn to your opponent. It stays hidden while it moves like a pawn. Moving like a queen, giving check or blocking one of their moves reveals it.' },
+  // weapons
+  thunder: { how: 'Pick an enemy piece (not the king or queen).', tip: 'Destroys it, and every enemy piece next to it is stunned for a turn and loses its shield.' },
+  slash: { how: 'Pick one of your pieces. It cuts the 3 squares in front of it.', tip: 'Cuts down enemy pawns, knights and bishops in those squares. Great when they line up in front of your pawns.' },
+  // legendaries
+  hyperbeam: { how: 'Pick one of your pieces, then a direction (the first square that way).', tip: 'The beam goes all the way to the edge of the board and hits every enemy on the way, queens included. Your own pieces aren’t hurt.' },
+  orbital: { how: 'Pick the center of a 3×3 area.', tip: 'Wipes out every enemy pawn, knight, bishop and rook in the area. Kings, queens and shielded pieces survive.' },
+  zero: { how: 'Pick the center of a 3×3 area.', tip: 'Every enemy piece there is frozen for their next 3 turns and loses its shield. Freeze their whole defence at once.' },
+  storm: { how: 'No target. Just press Play.', tip: 'Up to 3 random enemy pieces get struck by lightning. Never the king or queen.' },
+  aegis: { how: 'Pick one of your pieces (not the king).', tip: 'It and every friendly piece around it are shielded for 2 enemy turns. Free action.' },
+  ascension: { how: 'Pick one of your pawns.', tip: 'It becomes a queen on the spot. Uses your turn.' },
+  shadowarmy: { how: 'No target. Just press Play.', tip: 'Your two strongest captured pieces rise again on your back ranks.' },
+  timestop: { how: 'No target. Just press Play, then keep moving.', tip: 'You get two bonus turns in a row. A bonus turn is skipped if you give check, so set up first, strike last.' },
+  hypnosis: { how: 'Pick an enemy knight, bishop or rook anywhere.', tip: 'It joins your side permanently. Shielded pieces resist.' },
 };

@@ -7,10 +7,10 @@
 //   free: true if using it does NOT end your turn
 // The server validates picks by replaying step() — the same function that drives UI highlights.
 import {
-  ALL_SQUARES, ORTHO, NAMES, VALUE, other, rankOf, offset, neighbors, pawnOk, safeAfter, pieceTargets, kingAttacked, sqName,
+  ALL_SQUARES, ORTHO, NAMES, VALUE, other, rankOf, fileOf, offset, neighbors, pawnOk, safeAfter, pieceTargets, kingAttacked, sqName,
 } from './rules.js';
 import {
-  POOLS, mark, shielded, frozen, relocate, relocateMany, destroy, arrive, hole, hazard, giveItem, restore, snapshot, pick, shuffled,
+  POOLS, mark, shielded, frozen, isFake, isDisguised, relocate, relocateMany, destroy, arrive, hole, hazard, giveItem, restore, snapshot, pick, shuffled,
 } from './state.js';
 
 const own = (st, c, pred = () => true) =>
@@ -26,6 +26,7 @@ function moveTargets(st, c, from, opts) {
   const p = st.board[from];
   return pieceTargets(st.board, from, p[1], opts.friend, opts.ghost)
     .filter(s => !hole(st, s))
+    .filter(s => !st.board[s] || !isFake(st, from))
     .filter(s => !st.board[s] || (st.board[s][1] !== 'k' && !shielded(st, s)))
     .filter(s => safeAfter(st.board, c, b => { b[s] = b[from]; delete b[from]; }));
 }
@@ -33,7 +34,7 @@ function moveTargets(st, c, from, opts) {
 /** Move a piece using a custom rule (ghost / mind control), capturing on the destination. */
 function customMove(st, c, from, to, fx, style) {
   const captured = st.board[to];
-  if (captured) { destroy(st, to); fx.push({ k: 'capture', sq: to }); }
+  if (captured) { const by = st.board[from][1]; destroy(st, to); fx.push({ k: 'capture', sq: to, by, color: c }); }
   relocate(st, from, to);
   st.lastMove = { from, to };
   st.half = captured ? 0 : st.half + 1;
@@ -50,6 +51,49 @@ function laserTargets(st, c, from) {
   }
   return out;
 }
+/** A disguised queen just did something no pawn could: everyone sees it now. */
+export function revealAt(st, sqs, fx) {
+  const out = sqs.filter(s => isDisguised(st, s));
+  out.forEach(s => delete st.marks[s].disguise);
+  if (out.length) fx.push({ k: 'reveal', sqs: out });
+  return out.length > 0;
+}
+const enemyDisguisedIn = (st, c, sqs) => sqs.filter(s => st.board[s]?.[0] === other(c) && isDisguised(st, s));
+const realPiece = st => (p, s) => !isFake(st, s);
+
+const slashArea = (c, from) => [-1, 0, 1].map(df => offset(from, df, c === 'w' ? 1 : -1)).filter(Boolean);
+const slashHits = (st, c, from) => slashArea(c, from).filter(s => st.board[s] && st.board[s][0] !== c && 'pnb'.includes(st.board[s][1]) && !shielded(st, s));
+const area3 = sq => [sq, ...neighbors(sq)];
+const orbitalHits = (st, c, sq) => area3(sq).filter(s => st.board[s] && st.board[s][0] !== c && hittable(st)(st.board[s], s) && st.board[s][1] !== 'q');
+const zeroHits = (st, c, sq) => area3(sq).filter(s => st.board[s] && st.board[s][0] !== c && st.board[s][1] !== 'k');
+const stormTargets = (st, c) => enemy(st, c, (p, s) => hittable(st)(p, s) && p[1] !== 'q');
+function beamDirs(st, c, from) {
+  const out = [];
+  for (const [df, dr] of ORTHO) {
+    const first = offset(from, df, dr);
+    if (!first) continue;
+    const hits = [];
+    let s = first, end = first;
+    while (s) { end = s; const p = st.board[s]; if (p && p[0] !== c && hittable(st)(p, s)) hits.push(s); s = offset(s, df, dr); }
+    if (hits.length && clearsSafely(st, c, hits)) out.push({ first, end, hits });
+  }
+  return out;
+}
+/** Shadow Army: the two strongest captured pieces and where they rise. */
+function armyPlan(st, c) {
+  const types = st.captured[c].filter(t => t !== 'k').sort((a, b) => VALUE[b] - VALUE[a]).slice(0, 2);
+  const used = new Set(), out = [];
+  const byCenter = (a, b) => Math.abs(fileOf(a) - 3.5) - Math.abs(fileOf(b) - 3.5);
+  for (const t of types) {
+    const ranks = t === 'p' ? [c === 'w' ? 1 : 6] : c === 'w' ? [0, 1] : [7, 6];
+    const sq = ranks.flatMap(r => ALL_SQUARES.filter(x => rankOf(x) === r && !st.board[x] && !hazard(st, x) && !used.has(x)).sort(byCenter))[0];
+    if (!sq) continue;
+    used.add(sq);
+    out.push([t, sq]);
+  }
+  return out;
+}
+
 const shotgunTargets = (st, c, from) =>
   neighbors(from).filter(s => st.board[s] && st.board[s][0] !== c && hittable(st)(st.board[s], s) && st.board[s][1] !== 'q');
 // Removing an enemy piece can open a line from another enemy piece to your king.
@@ -150,7 +194,7 @@ export const ITEMS = {
       if (picks.length === 1) return step('Phase through to…', dests(picks[0]));
       return null;
     },
-    apply(st, c, [from, to], fx) { customMove(st, c, from, to, fx, 'ghost'); },
+    apply(st, c, [from, to], fx) { revealAt(st, [from], fx); customMove(st, c, from, to, fx, 'ghost'); },
   },
   freeze: {
     cat: 'power', name: 'Freeze', icon: 'snowflake', free: true, desc: "An enemy piece can't move for its next 2 turns. Free action.",
@@ -191,7 +235,7 @@ export const ITEMS = {
   laser: {
     cat: 'weapon', name: 'Laser', icon: 'zap', desc: 'Fire a beam from one of your pieces. Destroys the first enemy in a straight line.',
     step(st, c, picks) {
-      if (!picks.length) return step('Pick a piece to fire from', own(st, c, (p, s) => movable(st)(p, s) && laserTargets(st, c, s).length));
+      if (!picks.length) return step('Pick a piece to fire from', own(st, c, (p, s) => movable(st)(p, s) && realPiece(st)(p, s) && laserTargets(st, c, s).length));
       if (picks.length === 1) return step('Pick a target', laserTargets(st, c, picks[0]));
       return null;
     },
@@ -225,8 +269,9 @@ export const ITEMS = {
   },
   shotgun: {
     cat: 'weapon', name: 'Shotgun', icon: 'crosshair', desc: 'Blast every adjacent enemy pawn, knight, bishop or rook around one of your pieces.',
-    step: (st, c, picks) => (picks.length ? null : step('Pick a piece to fire from', own(st, c, (p, s) => movable(st)(p, s) && shotgunTargets(st, c, s).length && clearsSafely(st, c, shotgunTargets(st, c, s))))),
+    step: (st, c, picks) => (picks.length ? null : step('Pick a piece to fire from', own(st, c, (p, s) => movable(st)(p, s) && realPiece(st)(p, s) && shotgunTargets(st, c, s).length && clearsSafely(st, c, shotgunTargets(st, c, s))))),
     apply(st, c, [from], fx) {
+      revealAt(st, enemyDisguisedIn(st, c, neighbors(from)), fx); // a "pawn" that shrugs off buckshot is no pawn
       const hits = shotgunTargets(st, c, from);
       hits.forEach(s => destroy(st, s));
       fx.push({ k: 'boom', sqs: hits, kind: 'shotgun', from });
@@ -254,6 +299,7 @@ export const ITEMS = {
     available: (st, c) => !kingAttacked(st.board, c),
     step: () => null,
     apply(st, c, _p, fx, rnd = Math.random) {
+      revealAt(st, Object.keys(st.board), fx);
       const pawns = Object.keys(st.board).filter(s => st.board[s][1] === 'p');
       for (let attempt = 0; attempt < 30; attempt++) {
         const b = { ...st.board };
@@ -302,7 +348,187 @@ export const ITEMS = {
     },
     apply(st, c, [kind], fx) { giveItem(st, c, kind, fx, 'wildcard'); },
   },
+
+  // ----------------------------------------------------------- new weapons
+  thunder: {
+    cat: 'weapon', name: 'Thunder', icon: 'cloud-lightning', desc: 'Lightning strikes an enemy piece (not the king or queen). It’s destroyed and the enemies next to it are stunned for a turn.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick a target', enemy(st, c, (p, s) => hittable(st)(p, s) && p[1] !== 'q' && clearsSafely(st, c, [s])))),
+    apply(st, c, [sq], fx) {
+      destroy(st, sq);
+      const stunned = neighbors(sq).filter(s => st.board[s] && st.board[s][0] !== c && st.board[s][1] !== 'k');
+      stunned.forEach(s => { const m = mark(st, s); delete m.shield; m.frozen = Math.max(m.frozen || 0, st.ply + 2); });
+      fx.push({ k: 'thunder', sq, sqs: stunned }, { k: 'boom', sqs: [sq], kind: 'thunder' });
+    },
+  },
+  slash: {
+    cat: 'weapon', name: 'Crescent Slash', icon: 'sword', desc: 'One of your pieces slashes the 3 squares in front of it. Enemy pawns, knights and bishops there are cut down.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick a piece to slash with', own(st, c, (p, s) => movable(st)(p, s) && realPiece(st)(p, s) && slashHits(st, c, s).length && clearsSafely(st, c, slashHits(st, c, s))))),
+    apply(st, c, [from], fx) {
+      const area = slashArea(c, from);
+      revealAt(st, enemyDisguisedIn(st, c, area), fx);
+      const hits = slashHits(st, c, from);
+      hits.forEach(s => destroy(st, s));
+      fx.push({ k: 'slash', from, sqs: hits, area }, { k: 'boom', sqs: hits, kind: 'slash' });
+    },
+  },
+
+  // ------------------------------------------------------------- new cards
+  imposter: {
+    cat: 'card', name: 'Imposter', icon: 'venetian-mask', desc: 'A fake copy of your queen appears next to her and they shuffle places. Your opponent can’t tell which is real. The fake can’t capture and fades after 6 turns.',
+    step(st, c, picks) {
+      const spots = q => neighbors(q).filter(s => !st.board[s] && !hazard(st, s) && safeAfter(st.board, c, b => { b[s] = b[q]; delete b[q]; }));
+      if (!picks.length) return step('Pick your queen', own(st, c, (p, s) => p[1] === 'q' && !isFake(st, s) && !isDisguised(st, s) && !frozen(st, s) && spots(s).length));
+      if (picks.length === 1) return step('Where does the imposter appear?', spots(picks[0]));
+      return null;
+    },
+    apply(st, c, [q, t], fx, rnd = Math.random) {
+      // 50/50 the real queen slips onto the new square, so neither square gives it away
+      const fakeAt = rnd() < 0.5 ? q : t;
+      if (fakeAt === q) relocate(st, q, t);
+      st.board[fakeAt] = c + 'q';
+      st.marks[fakeAt] = { fake: st.ply + 12 };
+      fx.push({ k: 'imposter-in', sqs: [q, t] });
+    },
+  },
+  disguise: {
+    cat: 'card', name: 'Disguise', icon: 'eye', free: true, secret: true,
+    secretDesc: 'One of their pawns is secretly a queen now… but which one?',
+    desc: 'Secretly turn one of your pawns into a queen. Your opponent still sees a pawn until it moves like a queen, gives check or blocks them. Free action.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick a pawn to disguise (your opponent won’t see it)', own(st, c, (p, s) => p[1] === 'p' && !frozen(st, s) && safeAfter(st.board, other(c), b => { b[s] = c + 'q'; })))),
+    apply(st, c, [sq], fx) {
+      st.board[sq] = c + 'q';
+      mark(st, sq).disguise = true;
+      fx.push({ k: 'aura', sqs: [sq], kind: 'disguise', only: c });
+    },
+  },
+
+  // ------------------------------------------------- legendaries (fusion and quest rewards only)
+  hyperbeam: {
+    cat: 'weapon', legendary: true, name: 'Hyper Beam', icon: 'zap', desc: 'A giant beam fires from one of your pieces to the edge of the board, destroying every enemy in its path except the king.',
+    step(st, c, picks) {
+      if (!picks.length) return step('Pick a piece to fire from', own(st, c, (p, s) => movable(st)(p, s) && realPiece(st)(p, s) && beamDirs(st, c, s).length));
+      if (picks.length === 1) return step('Pick a direction', beamDirs(st, c, picks[0]).map(d => d.first));
+      return null;
+    },
+    apply(st, c, [from, first], fx) {
+      const d = beamDirs(st, c, from).find(x => x.first === first);
+      d.hits.forEach(s => destroy(st, s));
+      fx.push({ k: 'hyperbeam', from, to: d.end, sqs: d.hits }, { k: 'boom', sqs: d.hits, kind: 'hyperbeam' });
+    },
+  },
+  orbital: {
+    cat: 'weapon', legendary: true, name: 'Orbital Strike', icon: 'satellite', desc: 'A strike from space hits a 3×3 area. Every enemy there is destroyed, except the king and queen.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick the center of the strike', ALL_SQUARES.filter(s => { const h = orbitalHits(st, c, s); return h.length && clearsSafely(st, c, h); }))),
+    apply(st, c, [sq], fx) {
+      revealAt(st, enemyDisguisedIn(st, c, area3(sq)), fx);
+      const hits = orbitalHits(st, c, sq);
+      hits.forEach(s => destroy(st, s));
+      fx.push({ k: 'orbital', sq, sqs: hits, area: area3(sq) }, { k: 'boom', sqs: hits, kind: 'orbital' });
+    },
+  },
+  zero: {
+    cat: 'weapon', legendary: true, name: 'Absolute Zero', icon: 'snowflake', desc: 'Every enemy piece in a 3×3 area is frozen solid for their next 3 turns. Shields shatter.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick the center', ALL_SQUARES.filter(s => zeroHits(st, c, s).length))),
+    apply(st, c, [sq], fx) {
+      const hits = zeroHits(st, c, sq);
+      hits.forEach(s => { const m = mark(st, s); delete m.shield; m.frozen = Math.max(m.frozen || 0, st.ply + 6); });
+      fx.push({ k: 'zero', sq, sqs: hits, area: area3(sq) });
+    },
+  },
+  storm: {
+    cat: 'weapon', legendary: true, name: 'Thunder God', icon: 'cloud-lightning', desc: 'Lightning rains down on up to 3 random enemy pieces (never the king or queen).',
+    available: (st, c) => !kingAttacked(st.board, c) && stormTargets(st, c).length > 0,
+    step: () => null,
+    apply(st, c, _p, fx, rnd = Math.random) {
+      const hits = [];
+      for (const s of shuffled(stormTargets(st, c), rnd)) {
+        if (hits.length >= 3) break;
+        if (clearsSafely(st, c, [...hits, s])) hits.push(s);
+      }
+      hits.forEach(s => destroy(st, s));
+      fx.push({ k: 'storm', sqs: hits }, { k: 'boom', sqs: hits, kind: 'thunder' });
+    },
+  },
+  aegis: {
+    cat: 'power', legendary: true, free: true, name: 'Aegis', icon: 'shield-plus', desc: 'A golden barrier: one of your pieces and every friendly piece next to it are shielded for 2 enemy turns. Free action.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick the center of the barrier', own(st, c, notKing))),
+    apply(st, c, [sq], fx) {
+      const sqs = area3(sq).filter(s => st.board[s]?.[0] === c && st.board[s][1] !== 'k');
+      sqs.forEach(s => (mark(st, s).shield = st.ply + 4));
+      fx.push({ k: 'aegis', sq, sqs });
+    },
+  },
+  ascension: {
+    cat: 'power', legendary: true, name: 'Ascension', icon: 'crown', desc: 'One of your pawns ascends into a queen.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick a pawn to ascend', own(st, c, p => p[1] === 'p'))),
+    apply(st, c, [sq], fx) { st.board[sq] = c + 'q'; fx.push({ k: 'ascend', sq, color: c }); },
+  },
+  shadowarmy: {
+    cat: 'power', legendary: true, name: 'Shadow Army', icon: 'skull', desc: 'Your two strongest captured pieces rise from the shadows on your back ranks.',
+    available: (st, c) => armyPlan(st, c).length > 0,
+    step: () => null,
+    apply(st, c, _p, fx) {
+      const plan = armyPlan(st, c);
+      for (const [t, sq] of plan) { st.captured[c].splice(st.captured[c].indexOf(t), 1); st.board[sq] = c + t; }
+      fx.push({ k: 'arise', sqs: plan.map(p => p[1]), color: c });
+    },
+  },
+  timestop: {
+    cat: 'card', legendary: true, free: true, name: 'Time Stop', icon: 'hourglass', desc: 'Time freezes for your opponent: you take two extra turns. (A bonus turn is skipped if you give check.) Free action.',
+    step: () => null,
+    apply(st, c, _p, fx) { st.extra[c].push('stop', 'stop'); fx.push({ k: 'timestop', color: c }); },
+  },
+  hypnosis: {
+    cat: 'card', legendary: true, name: 'Hypnosis', icon: 'tornado', desc: 'Hypnotize an enemy knight, bishop or rook anywhere on the board. It joins your side for good.',
+    step: (st, c, picks) => (picks.length ? null : step('Pick an enemy piece', enemy(st, c, (p, s) => hittable(st)(p, s) && 'nbr'.includes(p[1])))),
+    apply(st, c, [sq], fx) {
+      st.board[sq] = c + st.board[sq][1];
+      delete st.marks[sq];
+      fx.push({ k: 'hypno', sq }, { k: 'aura', sqs: [sq], kind: 'steal' });
+    },
+  },
 };
+
+// ------------------------------------------------------------------ fusion
+const pair = (a, b) => [a, b].sort().join('+');
+const RECIPES = {};
+for (const [result, pairs] of Object.entries({
+  hyperbeam: [['laser', 'laser'], ['laser', 'emp'], ['laser', 'slash']],
+  orbital: [['rocket', 'rocket'], ['rocket', 'mine'], ['rocket', 'shotgun']],
+  zero: [['freeze', 'freeze'], ['freeze', 'emp'], ['emp', 'emp']],
+  storm: [['thunder', 'thunder'], ['thunder', 'emp'], ['thunder', 'laser']],
+  aegis: [['shield', 'shield'], ['shield', 'resurrect'], ['shield', 'freeze']],
+  ascension: [['evolve', 'evolve'], ['evolve', 'resurrect'], ['evolve', 'clone']],
+  shadowarmy: [['resurrect', 'resurrect'], ['resurrect', 'clone'], ['ghost', 'resurrect']],
+  timestop: [['skip', 'skip'], ['double', 'skip'], ['double', 'double'], ['reverse', 'skip'], ['reverse', 'reverse']],
+  hypnosis: [['mind', 'mind'], ['steal', 'steal'], ['mind', 'steal'], ['imposter', 'disguise']],
+})) for (const [a, b] of pairs) RECIPES[pair(a, b)] = result;
+// Cross-group recipes: these only come up in Chaos, where one hand mixes power-ups, weapons and cards.
+for (const [result, pairs] of Object.entries({
+  hyperbeam: [['ghost', 'laser'], ['evolve', 'laser']],
+  orbital: [['teleport', 'rocket'], ['emp', 'mine']],
+  zero: [['freeze', 'thunder'], ['freeze', 'slash']],
+  storm: [['thunder', 'double'], ['shotgun', 'thunder']],
+  aegis: [['emp', 'shield'], ['reverse', 'shield']],
+  ascension: [['disguise', 'evolve'], ['evolve', 'steal']],
+  shadowarmy: [['imposter', 'clone'], ['resurrect', 'mimic']],
+  timestop: [['rewind', 'skip'], ['double', 'rewind'], ['swap', 'skip']],
+  hypnosis: [['mind', 'shuffle'], ['mind', 'imposter']],
+})) for (const [a, b] of pairs) RECIPES[pair(a, b)] = result;
+
+export const LEGENDS = { power: ['ascension', 'aegis', 'shadowarmy'], weapon: ['hyperbeam', 'orbital', 'zero', 'storm'], card: ['timestop', 'hypnosis'] };
+export const LEGENDARY_KINDS = Object.values(LEGENDS).flat();
+
+/** What two items fuse into: a legendary kind, 'random' (a random legendary), or null (can't fuse). */
+export function fusionOf(a, b) {
+  if (!ITEMS[a] || !ITEMS[b] || ITEMS[a].legendary || ITEMS[b].legendary) return null;
+  return RECIPES[pair(a, b)] || 'random';
+}
+export function rollFusion(a, b, rnd = Math.random) {
+  const f = fusionOf(a, b);
+  if (f !== 'random') return f;
+  return pick([...new Set([...LEGENDS[ITEMS[a].cat], ...LEGENDS[ITEMS[b].cat]])], rnd);
+}
 
 /** A turn-ending item must never leave your own king in check: simulate it on a copy. */
 // When you're not in check, items can't expose your king without noticing: the ones that move or
